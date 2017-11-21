@@ -1,0 +1,2776 @@
+--- orgLin/linux-yocto-3.14/mm/slob.c	2017-06-09 16:06:32.562487823 -0700
++++ linux-yocto-3.14/mm/slob.c	2017-06-09 15:54:16.238859504 -0700
+@@ -60,19 +60,24 @@
+ #include <linux/slab.h>
+ 
+ #include <linux/mm.h>
+-#include <linux/swap.h> /* struct reclaim_state */
++#include <linux/swap.h>
+ #include <linux/cache.h>
+ #include <linux/init.h>
+ #include <linux/export.h>
+ #include <linux/rcupdate.h>
+ #include <linux/list.h>
+ #include <linux/kmemleak.h>
+-
++#include <linux/syscalls.h>
+ #include <trace/events/kmem.h>
+ 
++#include <linux/linkage.h>
+ #include <linux/atomic.h>
+ 
+ #include "slab.h"
++
++// Keep track of all the pages we allocate
++long page_cnt = 0;
++
+ /*
+  * slob_block has a field 'units', which indicates size of block if +ve,
+  * or offset of next block if -ve (in SLOB_UNITs).
+@@ -88,37 +93,33 @@
+ #endif
+ 
+ struct slob_block {
+-	slobidx_t units;
++    slobidx_t units;
+ };
+ typedef struct slob_block slob_t;
+ 
+ /*
+- * All partially free slob pages go on these lists.
++ * All partially free slob pages go on this list.
+  */
+-#define SLOB_BREAK1 256
+-#define SLOB_BREAK2 1024
+-static LIST_HEAD(free_slob_small);
+-static LIST_HEAD(free_slob_medium);
+-static LIST_HEAD(free_slob_large);
++static LIST_HEAD(free_slob);
+ 
+ /*
+  * slob_page_free: true for pages on free_slob_pages list.
+  */
+ static inline int slob_page_free(struct page *sp)
+ {
+-	return PageSlobFree(sp);
++    return PageSlobFree(sp);
+ }
+ 
+ static void set_slob_page_free(struct page *sp, struct list_head *list)
+ {
+-	list_add(&sp->list, list);
+-	__SetPageSlobFree(sp);
++    list_add(&sp->list, list);
++    __SetPageSlobFree(sp);
+ }
+ 
+ static inline void clear_slob_page_free(struct page *sp)
+ {
+-	list_del(&sp->list);
+-	__ClearPageSlobFree(sp);
++    list_del(&sp->list);
++    __ClearPageSlobFree(sp);
+ }
+ 
+ #define SLOB_UNIT sizeof(slob_t)
+@@ -130,10 +131,9 @@
+  * the block using call_rcu.
+  */
+ struct slob_rcu {
+-	struct rcu_head head;
+-	int size;
++    struct rcu_head head;
++    int size;
+ };
+-
+ /*
+  * slob_lock protects all slob allocator structures.
+  */
+@@ -144,14 +144,14 @@
+  */
+ static void set_slob(slob_t *s, slobidx_t size, slob_t *next)
+ {
+-	slob_t *base = (slob_t *)((unsigned long)s & PAGE_MASK);
+-	slobidx_t offset = next - base;
++    slob_t *base = (slob_t *)((unsigned long)s & PAGE_MASK);
++    slobidx_t offset = next - base;
+ 
+-	if (size > 1) {
+-		s[0].units = size;
+-		s[1].units = offset;
+-	} else
+-		s[0].units = -offset;
++    if (size > 1) {
++        s[0].units = size;
++        s[1].units = offset;
++    } else
++        s[0].units = -offset;
+ }
+ 
+ /*
+@@ -159,9 +159,9 @@
+  */
+ static slobidx_t slob_units(slob_t *s)
+ {
+-	if (s->units > 0)
+-		return s->units;
+-	return 1;
++    if (s->units > 0)
++        return s->units;
++    return 1;
+ }
+ 
+ /*
+@@ -169,14 +169,14 @@
+  */
+ static slob_t *slob_next(slob_t *s)
+ {
+-	slob_t *base = (slob_t *)((unsigned long)s & PAGE_MASK);
+-	slobidx_t next;
++    slob_t *base = (slob_t *)((unsigned long)s & PAGE_MASK);
++    slobidx_t next;
+ 
+-	if (s[0].units < 0)
+-		next = -s[0].units;
+-	else
+-		next = s[1].units;
+-	return base+next;
++    if (s[0].units < 0)
++        next = -s[0].units;
++    else
++        next = s[1].units;
++    return base+next;
+ }
+ 
+ /*
+@@ -184,31 +184,31 @@
+  */
+ static int slob_last(slob_t *s)
+ {
+-	return !((unsigned long)slob_next(s) & ~PAGE_MASK);
++    return !((unsigned long)slob_next(s) & ~PAGE_MASK);
+ }
+ 
+ static void *slob_new_pages(gfp_t gfp, int order, int node)
+ {
+-	void *page;
++    void *page;
+ 
+ #ifdef CONFIG_NUMA
+-	if (node != NUMA_NO_NODE)
+-		page = alloc_pages_exact_node(node, gfp, order);
+-	else
++    if (node != NUMA_NO_NODE)
++        page = alloc_pages_exact_node(node, gfp, order);
++    else
+ #endif
+-		page = alloc_pages(gfp, order);
++        page = alloc_pages(gfp, order);
+ 
+-	if (!page)
+-		return NULL;
++    if (!page)
++        return NULL;
+ 
+-	return page_address(page);
++    return page_address(page);
+ }
+ 
+ static void slob_free_pages(void *b, int order)
+ {
+-	if (current->reclaim_state)
+-		current->reclaim_state->reclaimed_slab += 1 << order;
+-	free_pages((unsigned long)b, order);
++    if (current->reclaim_state)
++        current->reclaim_state->reclaimed_slab += 1 << order;
++    free_pages((unsigned long)b, order);
+ }
+ 
+ /*
+@@ -216,50 +216,49 @@
+  */
+ static void *slob_page_alloc(struct page *sp, size_t size, int align)
+ {
+-	slob_t *prev, *cur, *aligned = NULL;
+-	int delta = 0, units = SLOB_UNITS(size);
+-
+-	for (prev = NULL, cur = sp->freelist; ; prev = cur, cur = slob_next(cur)) {
+-		slobidx_t avail = slob_units(cur);
+-
+-		if (align) {
+-			aligned = (slob_t *)ALIGN((unsigned long)cur, align);
+-			delta = aligned - cur;
+-		}
+-		if (avail >= units + delta) { /* room enough? */
+-			slob_t *next;
+-
+-			if (delta) { /* need to fragment head to align? */
+-				next = slob_next(cur);
+-				set_slob(aligned, avail - delta, next);
+-				set_slob(cur, delta, aligned);
+-				prev = cur;
+-				cur = aligned;
+-				avail = slob_units(cur);
+-			}
+-
+-			next = slob_next(cur);
+-			if (avail == units) { /* exact fit? unlink. */
+-				if (prev)
+-					set_slob(prev, slob_units(prev), next);
+-				else
+-					sp->freelist = next;
+-			} else { /* fragment */
+-				if (prev)
+-					set_slob(prev, slob_units(prev), cur + units);
+-				else
+-					sp->freelist = cur + units;
+-				set_slob(cur + units, avail - units, next);
+-			}
+-
+-			sp->units -= units;
+-			if (!sp->units)
+-				clear_slob_page_free(sp);
+-			return cur;
+-		}
+-		if (slob_last(cur))
+-			return NULL;
+-	}
++    slob_t *prev, *cur, *aligned = NULL;
++    int delta = 0, units = SLOB_UNITS(size);
++    for (prev = NULL, cur = sp->freelist; ; prev = cur, cur = slob_next(cur)) {
++        slobidx_t avail = slob_units(cur);
++
++        if (align) {
++            aligned = (slob_t *)ALIGN((unsigned long)cur, align);
++            delta = aligned - cur;
++        }
++        if (avail >= units + delta) { /* room enough? */
++            slob_t *next;
++
++            if (delta) { /* need to fragment head to align? */
++                next = slob_next(cur);
++                set_slob(aligned, avail - delta, next);
++                set_slob(cur, delta, aligned);
++                prev = cur;
++                cur = aligned;
++                avail = slob_units(cur);
++            }
++
++            next = slob_next(cur);
++            if (avail == units) { /* exact fit? unlink. */
++                if (prev)
++                    set_slob(prev, slob_units(prev), next);
++                else
++                    sp->freelist = next;
++            } else { /* fragment */
++                if (prev)
++                    set_slob(prev, slob_units(prev), cur + units);
++                else
++                    sp->freelist = cur + units;
++                set_slob(cur + units, avail - units, next);
++            }
++
++            sp->units -= units;
++            if (!sp->units)
++                clear_slob_page_free(sp);
++            return cur;
++        }
++        if (slob_last(cur))
++            return NULL;
++    }
+ }
+ 
+ /*
+@@ -267,71 +266,157 @@
+  */
+ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
+ {
+-	struct page *sp;
+-	struct list_head *prev;
+-	struct list_head *slob_list;
+-	slob_t *b = NULL;
+-	unsigned long flags;
+-
+-	if (size < SLOB_BREAK1)
+-		slob_list = &free_slob_small;
+-	else if (size < SLOB_BREAK2)
+-		slob_list = &free_slob_medium;
+-	else
+-		slob_list = &free_slob_large;
+-
+-	spin_lock_irqsave(&slob_lock, flags);
+-	/* Iterate through each partially free page, try to find room */
+-	list_for_each_entry(sp, slob_list, list) {
++    //int newPage = 0;
++    slobidx_t avail;
++    slobidx_t smallest_block_size;
++    slob_t *prev;
++    slob_t *cur;
++    slob_t *aligned;
++    int delta;
++    int units;
++    struct page *sp;
++    struct page *sp_other;
++    struct list_head *slob_list;
++    slob_t *b;
++    slob_t *next;
++    unsigned long flags;
++
++    smallest_block_size = 0;
++    aligned = NULL;
++    delta = 0;
++    sp_other = NULL;
++    b = NULL;
++
++    // We only have one list because we check everything anyways
++    slob_list = &free_slob;
++
++    spin_lock_irqsave(&slob_lock, flags);
++    units = SLOB_UNITS(size);
++    /* Iterate through each partially free page, try to find room */
++    list_for_each_entry(sp, slob_list, list) {
+ #ifdef CONFIG_NUMA
+-		/*
+-		 * If there's a node specification, search for a partial
+-		 * page with a matching node id in the freelist.
+-		 */
+-		if (node != NUMA_NO_NODE && page_to_nid(sp) != node)
+-			continue;
++        /*
++         * If there's a node specification, search for a partial
++         * page with a matching node id in the freelist.
++         */
++        if (node != NUMA_NO_NODE && page_to_nid(sp) != node)
++            continue;
+ #endif
+-		/* Enough room on this page? */
+-		if (sp->units < SLOB_UNITS(size))
+-			continue;
+-
+-		/* Attempt to alloc */
+-		prev = sp->list.prev;
+-		b = slob_page_alloc(sp, size, align);
+-		if (!b)
+-			continue;
+-
+-		/* Improve fragment distribution and reduce our average
+-		 * search time by starting our next search here. (see
+-		 * Knuth vol 1, sec 2.5, pg 449) */
+-		if (prev != slob_list->prev &&
+-				slob_list->next != prev->next)
+-			list_move_tail(slob_list, prev->next);
+-		break;
+-	}
+-	spin_unlock_irqrestore(&slob_lock, flags);
+-
+-	/* Not enough space: must allocate a new page */
+-	if (!b) {
+-		b = slob_new_pages(gfp & ~__GFP_ZERO, 0, node);
+-		if (!b)
+-			return NULL;
+-		sp = virt_to_page(b);
+-		__SetPageSlab(sp);
+-
+-		spin_lock_irqsave(&slob_lock, flags);
+-		sp->units = SLOB_UNITS(PAGE_SIZE);
+-		sp->freelist = b;
+-		INIT_LIST_HEAD(&sp->list);
+-		set_slob(b, SLOB_UNITS(PAGE_SIZE), b + SLOB_UNITS(PAGE_SIZE));
+-		set_slob_page_free(sp, slob_list);
+-		b = slob_page_alloc(sp, size, align);
+-		BUG_ON(!b);
+-		spin_unlock_irqrestore(&slob_lock, flags);
+-	}
+-	if (unlikely((gfp & __GFP_ZERO) && b))
+-		memset(b, 0, size);
+-	return b;
++        /* Enough room on this page? */
++        if (sp->units < SLOB_UNITS(size))
++            continue;
++
++        /* Is there a large enough contiguous block? */
++        // Find the smallest block that is large enough
++        delta = 0;
++        for (prev = NULL, cur = sp->freelist; ; prev = cur, cur = slob_next(cur)) {
++            avail = slob_units(cur);
++
++            if (align) {
++                aligned = (slob_t *)ALIGN((unsigned long)cur, align);
++                delta = aligned - cur;
++            }
++
++            if (avail >= units + delta) { /* room enough? */
++                //Make sure we get the smallest of what we need
++                //Check if their is a free block available large enough to fit the data
++                //size of free block = smallest free block size or 0
++                if(smallest_block_size == 0){
++                    smallest_block_size = avail;
++                    sp_other = sp;
++                    sp_other->freelist = sp->freelist;
++                    sp_other->units = sp->units;
++                    sp_other->list = sp->list;
++                }else if(avail < smallest_block_size){
++                    smallest_block_size = avail;
++                    sp_other = sp;
++                    sp_other->freelist = sp->freelist;
++                    sp_other->units = sp->units;
++                    sp_other->list = sp->list;
++                }
++            }
++
++            if (slob_last(cur))
++                break;
++        }
++    }
++    // At this point, we have either found the smallest block, or we need to allocate a new page
++    if(sp_other != NULL && sp_other->freelist != NULL) {
++        delta = 0;
++        // Find the correct block
++        for (prev = NULL, cur = sp_other->freelist; ; prev = cur, cur = slob_next(cur)) {
++            avail = slob_units(cur);
++
++            if (align) {
++                aligned = (slob_t *)ALIGN((unsigned long)cur, align);
++                delta = aligned - cur;
++            }
++
++            // is this the one?
++            if (avail == smallest_block_size && avail >= units + delta) {
++                if (delta) {
++                    next = slob_next(cur);
++                    set_slob(aligned, avail - delta, next);
++                    set_slob(cur, delta, aligned);
++                    prev = cur;
++                    cur = aligned;
++                    avail = slob_units(cur);
++                }
++
++                next = slob_next(cur);
++                if (avail == units) {
++                    if (prev)
++                        set_slob(prev, slob_units(prev), next);
++                    else
++                        sp_other->freelist = next;
++                } else {
++                    if (prev)
++                        set_slob(prev, slob_units(prev), cur + units);
++                    else
++                        sp_other->freelist = cur + units;
++                    set_slob(cur + units, avail - units, next);
++                }
++
++                sp_other->units -= units;
++                if (!sp_other->units)
++                    clear_slob_page_free(sp_other);
++                b = cur;
++                break;
++            }
++
++            // We shouldnt pass this
++            if (slob_last(cur))
++                break;
++        }
++    }
++
++    spin_unlock_irqrestore(&slob_lock, flags);
++
++    /* Not enough space: must allocate a new page */
++    sp_other = NULL;
++    if (!b) {
++        b = slob_new_pages(gfp & ~__GFP_ZERO, 0, node);
++        if (!b)
++            return NULL;
++        sp = virt_to_page(b);
++        __SetPageSlab(sp);
++        page_cnt++;
++
++        spin_lock_irqsave(&slob_lock, flags);
++        sp->units = SLOB_UNITS(PAGE_SIZE);
++        sp->freelist = b;
++        INIT_LIST_HEAD(&sp->list);
++        set_slob(b, SLOB_UNITS(PAGE_SIZE), b + SLOB_UNITS(PAGE_SIZE));
++        set_slob_page_free(sp, slob_list);
++        b = slob_page_alloc(sp, size, align);
++        BUG_ON(!b);
++        spin_unlock_irqrestore(&slob_lock, flags);
++    }
++
++    if (unlikely((gfp & __GFP_ZERO) && b))
++        memset(b, 0, size);
++
++    return b;
+ }
+ 
+ /*
+@@ -339,307 +424,354 @@
+  */
+ static void slob_free(void *block, int size)
+ {
+-	struct page *sp;
+-	slob_t *prev, *next, *b = (slob_t *)block;
+-	slobidx_t units;
+-	unsigned long flags;
+-	struct list_head *slob_list;
+-
+-	if (unlikely(ZERO_OR_NULL_PTR(block)))
+-		return;
+-	BUG_ON(!size);
+-
+-	sp = virt_to_page(block);
+-	units = SLOB_UNITS(size);
+-
+-	spin_lock_irqsave(&slob_lock, flags);
+-
+-	if (sp->units + units == SLOB_UNITS(PAGE_SIZE)) {
+-		/* Go directly to page allocator. Do not pass slob allocator */
+-		if (slob_page_free(sp))
+-			clear_slob_page_free(sp);
+-		spin_unlock_irqrestore(&slob_lock, flags);
+-		__ClearPageSlab(sp);
+-		page_mapcount_reset(sp);
+-		slob_free_pages(b, 0);
+-		return;
+-	}
+-
+-	if (!slob_page_free(sp)) {
+-		/* This slob page is about to become partially free. Easy! */
+-		sp->units = units;
+-		sp->freelist = b;
+-		set_slob(b, units,
+-			(void *)((unsigned long)(b +
+-					SLOB_UNITS(PAGE_SIZE)) & PAGE_MASK));
+-		if (size < SLOB_BREAK1)
+-			slob_list = &free_slob_small;
+-		else if (size < SLOB_BREAK2)
+-			slob_list = &free_slob_medium;
+-		else
+-			slob_list = &free_slob_large;
+-		set_slob_page_free(sp, slob_list);
+-		goto out;
+-	}
+-
+-	/*
+-	 * Otherwise the page is already partially free, so find reinsertion
+-	 * point.
+-	 */
+-	sp->units += units;
+-
+-	if (b < (slob_t *)sp->freelist) {
+-		if (b + units == sp->freelist) {
+-			units += slob_units(sp->freelist);
+-			sp->freelist = slob_next(sp->freelist);
+-		}
+-		set_slob(b, units, sp->freelist);
+-		sp->freelist = b;
+-	} else {
+-		prev = sp->freelist;
+-		next = slob_next(prev);
+-		while (b > next) {
+-			prev = next;
+-			next = slob_next(prev);
+-		}
+-
+-		if (!slob_last(prev) && b + units == next) {
+-			units += slob_units(next);
+-			set_slob(b, units, slob_next(next));
+-		} else
+-			set_slob(b, units, next);
+-
+-		if (prev + slob_units(prev) == b) {
+-			units = slob_units(b) + slob_units(prev);
+-			set_slob(prev, units, slob_next(b));
+-		} else
+-			set_slob(prev, slob_units(prev), b);
+-	}
++    struct page *sp;
++    slob_t *prev, *next, *b = (slob_t *)block;
++    slobidx_t units;
++    unsigned long flags;
++    struct list_head *slob_list;
++
++    if (unlikely(ZERO_OR_NULL_PTR(block)))
++        return;
++    BUG_ON(!size);
++
++    sp = virt_to_page(block);
++    units = SLOB_UNITS(size);
++
++    spin_lock_irqsave(&slob_lock, flags);
++
++    if (sp->units + units == SLOB_UNITS(PAGE_SIZE)) {
++        /* Go directly to page allocator. Do not pass slob allocator */
++        if (slob_page_free(sp))
++            clear_slob_page_free(sp);
++        spin_unlock_irqrestore(&slob_lock, flags);
++        __ClearPageSlab(sp);
++        page_mapcount_reset(sp);
++
++        slob_free_pages(b, 0);
++        page_cnt--;
++        return;
++    }
++
++    if (!slob_page_free(sp)) {
++        /* This slob page is about to become partially free. Easy! */
++        sp->units = units;
++        sp->freelist = b;
++        set_slob(b, units,
++            (void *)((unsigned long)(b +
++                    SLOB_UNITS(PAGE_SIZE)) & PAGE_MASK));
++
++        slob_list = &free_slob;
++        set_slob_page_free(sp, slob_list);
++        goto out;
++    }
++
++    /*
++     * Otherwise the page is already partially free, so find reinsertion
++     * point.
++     */
++    sp->units += units;
++
++    if (b < (slob_t *)sp->freelist) {
++        if (b + units == sp->freelist) {
++            units += slob_units(sp->freelist);
++            sp->freelist = slob_next(sp->freelist);
++        }
++        set_slob(b, units, sp->freelist);
++        sp->freelist = b;
++    } else {
++        prev = sp->freelist;
++        next = slob_next(prev);
++        while (b > next) {
++            prev = next;
++            next = slob_next(prev);
++        }
++
++        if (!slob_last(prev) && b + units == next) {
++            units += slob_units(next);
++            set_slob(b, units, slob_next(next));
++        } else
++            set_slob(b, units, next);
++
++        if (prev + slob_units(prev) == b) {
++            units = slob_units(b) + slob_units(prev);
++            set_slob(prev, units, slob_next(b));
++        } else
++            set_slob(prev, slob_units(prev), b);
++    }
+ out:
+-	spin_unlock_irqrestore(&slob_lock, flags);
++    // Update total allocated memory by the given size
++    spin_unlock_irqrestore(&slob_lock, flags);
++    return;
+ }
+ 
+ /*
+  * End of slob allocator proper. Begin kmem_cache_alloc and kmalloc frontend.
+  */
+-
+ static __always_inline void *
+ __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
+ {
+-	unsigned int *m;
+-	int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
+-	void *ret;
++    unsigned int *m;
++    int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
++    void *ret;
+ 
+-	gfp &= gfp_allowed_mask;
++    gfp &= gfp_allowed_mask;
+ 
+-	lockdep_trace_alloc(gfp);
++    lockdep_trace_alloc(gfp);
+ 
+-	if (size < PAGE_SIZE - align) {
+-		if (!size)
+-			return ZERO_SIZE_PTR;
++    if (size < PAGE_SIZE - align) {
++        if (!size)
++            return ZERO_SIZE_PTR;
+ 
+-		m = slob_alloc(size + align, gfp, align, node);
++        m = slob_alloc(size + align, gfp, align, node);
+ 
+-		if (!m)
+-			return NULL;
+-		*m = size;
+-		ret = (void *)m + align;
++        if (!m)
++            return NULL;
++        *m = size;
++        ret = (void *)m + align;
+ 
+-		trace_kmalloc_node(caller, ret,
+-				   size, size + align, gfp, node);
+-	} else {
+-		unsigned int order = get_order(size);
++        trace_kmalloc_node(caller, ret,
++                   size, size + align, gfp, node);
++    } else {
++        unsigned int order = get_order(size);
+ 
+-		if (likely(order))
+-			gfp |= __GFP_COMP;
+-		ret = slob_new_pages(gfp, order, node);
++        if (likely(order))
++            gfp |= __GFP_COMP;
++        ret = slob_new_pages(gfp, order, node);
+ 
+-		trace_kmalloc_node(caller, ret,
+-				   size, PAGE_SIZE << order, gfp, node);
+-	}
++        trace_kmalloc_node(caller, ret,
++                   size, PAGE_SIZE << order, gfp, node);
++    }
+ 
+-	kmemleak_alloc(ret, size, 1, gfp);
+-	return ret;
++    kmemleak_alloc(ret, size, 1, gfp);
++    return ret;
+ }
+ 
+ void *__kmalloc(size_t size, gfp_t gfp)
+ {
+-	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, _RET_IP_);
++    return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, _RET_IP_);
+ }
+ EXPORT_SYMBOL(__kmalloc);
+ 
+ #ifdef CONFIG_TRACING
+ void *__kmalloc_track_caller(size_t size, gfp_t gfp, unsigned long caller)
+ {
+-	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, caller);
++    return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, caller);
+ }
+ 
+ #ifdef CONFIG_NUMA
+ void *__kmalloc_node_track_caller(size_t size, gfp_t gfp,
+-					int node, unsigned long caller)
++                    int node, unsigned long caller)
+ {
+-	return __do_kmalloc_node(size, gfp, node, caller);
++    return __do_kmalloc_node(size, gfp, node, caller);
+ }
+ #endif
+ #endif
+ 
+ void kfree(const void *block)
+ {
+-	struct page *sp;
++    struct page *sp;
+ 
+-	trace_kfree(_RET_IP_, block);
++    trace_kfree(_RET_IP_, block);
+ 
+-	if (unlikely(ZERO_OR_NULL_PTR(block)))
+-		return;
+-	kmemleak_free(block);
+-
+-	sp = virt_to_page(block);
+-	if (PageSlab(sp)) {
+-		int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
+-		unsigned int *m = (unsigned int *)(block - align);
+-		slob_free(m, *m + align);
+-	} else
+-		__free_pages(sp, compound_order(sp));
++    if (unlikely(ZERO_OR_NULL_PTR(block)))
++        return;
++    kmemleak_free(block);
++
++    sp = virt_to_page(block);
++    if (PageSlab(sp)) {
++        int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
++        unsigned int *m = (unsigned int *)(block - align);
++        slob_free(m, *m + align);
++    } else
++        __free_pages(sp, compound_order(sp));
+ }
+ EXPORT_SYMBOL(kfree);
+ 
+ /* can't use ksize for kmem_cache_alloc memory, only kmalloc */
+ size_t ksize(const void *block)
+ {
+-	struct page *sp;
+-	int align;
+-	unsigned int *m;
+-
+-	BUG_ON(!block);
+-	if (unlikely(block == ZERO_SIZE_PTR))
+-		return 0;
+-
+-	sp = virt_to_page(block);
+-	if (unlikely(!PageSlab(sp)))
+-		return PAGE_SIZE << compound_order(sp);
+-
+-	align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
+-	m = (unsigned int *)(block - align);
+-	return SLOB_UNITS(*m) * SLOB_UNIT;
++    struct page *sp;
++    int align;
++    unsigned int *m;
++
++    BUG_ON(!block);
++    if (unlikely(block == ZERO_SIZE_PTR))
++        return 0;
++
++    sp = virt_to_page(block);
++    if (unlikely(!PageSlab(sp)))
++        return PAGE_SIZE << compound_order(sp);
++
++    align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
++    m = (unsigned int *)(block - align);
++    return SLOB_UNITS(*m) * SLOB_UNIT;
+ }
+ EXPORT_SYMBOL(ksize);
+ 
+ int __kmem_cache_create(struct kmem_cache *c, unsigned long flags)
+ {
+-	if (flags & SLAB_DESTROY_BY_RCU) {
+-		/* leave room for rcu footer at the end of object */
+-		c->size += sizeof(struct slob_rcu);
+-	}
+-	c->flags = flags;
+-	return 0;
++    if (flags & SLAB_DESTROY_BY_RCU) {
++        /* leave room for rcu footer at the end of object */
++        c->size += sizeof(struct slob_rcu);
++    }
++    c->flags = flags;
++    return 0;
+ }
+ 
+ void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
+ {
+-	void *b;
++    void *b;
+ 
+-	flags &= gfp_allowed_mask;
++    flags &= gfp_allowed_mask;
+ 
+-	lockdep_trace_alloc(flags);
++    lockdep_trace_alloc(flags);
+ 
+-	if (c->size < PAGE_SIZE) {
+-		b = slob_alloc(c->size, flags, c->align, node);
+-		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
+-					    SLOB_UNITS(c->size) * SLOB_UNIT,
+-					    flags, node);
+-	} else {
+-		b = slob_new_pages(flags, get_order(c->size), node);
+-		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
+-					    PAGE_SIZE << get_order(c->size),
+-					    flags, node);
+-	}
++    if (c->size < PAGE_SIZE) {
++        b = slob_alloc(c->size, flags, c->align, node);
++        trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
++                        SLOB_UNITS(c->size) * SLOB_UNIT,
++                        flags, node);
++    } else {
++        b = slob_new_pages(flags, get_order(c->size), node);
++        trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
++                        PAGE_SIZE << get_order(c->size),
++                        flags, node);
++    }
+ 
+-	if (b && c->ctor)
+-		c->ctor(b);
++    if (b && c->ctor)
++        c->ctor(b);
+ 
+-	kmemleak_alloc_recursive(b, c->size, 1, c->flags, flags);
+-	return b;
++    kmemleak_alloc_recursive(b, c->size, 1, c->flags, flags);
++    return b;
+ }
+ EXPORT_SYMBOL(slob_alloc_node);
+ 
+ void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags)
+ {
+-	return slob_alloc_node(cachep, flags, NUMA_NO_NODE);
++    return slob_alloc_node(cachep, flags, NUMA_NO_NODE);
+ }
+ EXPORT_SYMBOL(kmem_cache_alloc);
+ 
+ #ifdef CONFIG_NUMA
+ void *__kmalloc_node(size_t size, gfp_t gfp, int node)
+ {
+-	return __do_kmalloc_node(size, gfp, node, _RET_IP_);
++    return __do_kmalloc_node(size, gfp, node, _RET_IP_);
+ }
+ EXPORT_SYMBOL(__kmalloc_node);
+ 
+ void *kmem_cache_alloc_node(struct kmem_cache *cachep, gfp_t gfp, int node)
+ {
+-	return slob_alloc_node(cachep, gfp, node);
++    return slob_alloc_node(cachep, gfp, node);
+ }
+ EXPORT_SYMBOL(kmem_cache_alloc_node);
+ #endif
+ 
+ static void __kmem_cache_free(void *b, int size)
+ {
+-	if (size < PAGE_SIZE)
+-		slob_free(b, size);
+-	else
+-		slob_free_pages(b, get_order(size));
++    if (size < PAGE_SIZE)
++        slob_free(b, size);
++    else
++        slob_free_pages(b, get_order(size));
+ }
+ 
+ static void kmem_rcu_free(struct rcu_head *head)
+ {
+-	struct slob_rcu *slob_rcu = (struct slob_rcu *)head;
+-	void *b = (void *)slob_rcu - (slob_rcu->size - sizeof(struct slob_rcu));
++    struct slob_rcu *slob_rcu = (struct slob_rcu *)head;
++    void *b = (void *)slob_rcu - (slob_rcu->size - sizeof(struct slob_rcu));
+ 
+-	__kmem_cache_free(b, slob_rcu->size);
++    __kmem_cache_free(b, slob_rcu->size);
+ }
+ 
+ void kmem_cache_free(struct kmem_cache *c, void *b)
+ {
+-	kmemleak_free_recursive(b, c->flags);
+-	if (unlikely(c->flags & SLAB_DESTROY_BY_RCU)) {
+-		struct slob_rcu *slob_rcu;
+-		slob_rcu = b + (c->size - sizeof(struct slob_rcu));
+-		slob_rcu->size = c->size;
+-		call_rcu(&slob_rcu->head, kmem_rcu_free);
+-	} else {
+-		__kmem_cache_free(b, c->size);
+-	}
++    kmemleak_free_recursive(b, c->flags);
++    if (unlikely(c->flags & SLAB_DESTROY_BY_RCU)) {
++        struct slob_rcu *slob_rcu;
++        slob_rcu = b + (c->size - sizeof(struct slob_rcu));
++        slob_rcu->size = c->size;
++        call_rcu(&slob_rcu->head, kmem_rcu_free);
++    } else {
++        __kmem_cache_free(b, c->size);
++    }
+ 
+-	trace_kmem_cache_free(_RET_IP_, b);
++    trace_kmem_cache_free(_RET_IP_, b);
+ }
+ EXPORT_SYMBOL(kmem_cache_free);
+ 
+ int __kmem_cache_shutdown(struct kmem_cache *c)
+ {
+-	/* No way to check for remaining objects */
+-	return 0;
++    /* No way to check for remaining objects */
++    return 0;
+ }
+ 
+ int kmem_cache_shrink(struct kmem_cache *d)
+ {
+-	return 0;
++    return 0;
+ }
+ EXPORT_SYMBOL(kmem_cache_shrink);
+ 
+ struct kmem_cache kmem_cache_boot = {
+-	.name = "kmem_cache",
+-	.size = sizeof(struct kmem_cache),
+-	.flags = SLAB_PANIC,
+-	.align = ARCH_KMALLOC_MINALIGN,
++    .name = "kmem_cache",
++    .size = sizeof(struct kmem_cache),
++    .flags = SLAB_PANIC,
++    .align = ARCH_KMALLOC_MINALIGN,
+ };
+ 
+ void __init kmem_cache_init(void)
+ {
+-	kmem_cache = &kmem_cache_boot;
+-	slab_state = UP;
++    kmem_cache = &kmem_cache_boot;
++    slab_state = UP;
+ }
+ 
+ void __init kmem_cache_init_late(void)
+ {
+-	slab_state = FULL;
++    slab_state = FULL;
++}
++
++
++/*
++* Returns the total SLOB amount of used allocated memory
++*/
++
++asmlinkage long sys_total_memory(void) {
++    long total_memory;
++    total_memory = SLOB_UNITS(PAGE_SIZE) * page_cnt;
++    return total_memory;
++}
++
++/*
++* Returns the total SLOB amount of unused allocated memory
++*/
++
++asmlinkage long sys_free_memory(void) {
++    long free_memory;
++    struct page *sp;
++    struct list_head *slob_list;
++    free_memory = 0;
++    slob_list = &free_slob;
++    list_for_each_entry(sp, slob_list, list) {
++        free_memory = free_memory + sp->units;
++    }
++
++    return free_memory;
++}
++
++/*
++* Returns the size of the largest free block
++*/
++asmlinkage long sys_slob_largest_free_block_size(void){
++    struct page *sp;
++    struct list_head *slob_list;
++    long largest_free_block;
++    largest_free_block = 0;
++
++    // Check all unused blocks that have been allocated
++    slob_list = &free_slob;
++    list_for_each_entry(sp, slob_list, list) {
++        if(largest_free_block < sp->units){
++            largest_free_block = sp->units;
++        }
++    }
++
++    return largest_free_block;
+ }
+--- orgLin/linux-yocto-3.14/arch/x86/syscalls/syscall_32.tbl	2017-06-09 16:06:28.760422638 -0700
++++ linux-yocto-3.14/arch/x86/syscalls/syscall_32.tbl	2017-06-09 14:00:01.307277754 -0700
+@@ -6,356 +6,359 @@
+ #
+ # The abi is always "i386" for this file.
+ #
+-0	i386	restart_syscall		sys_restart_syscall
+-1	i386	exit			sys_exit
+-2	i386	fork			sys_fork			stub32_fork
+-3	i386	read			sys_read
+-4	i386	write			sys_write
+-5	i386	open			sys_open			compat_sys_open
+-6	i386	close			sys_close
+-7	i386	waitpid			sys_waitpid			sys32_waitpid
+-8	i386	creat			sys_creat
+-9	i386	link			sys_link
+-10	i386	unlink			sys_unlink
+-11	i386	execve			sys_execve			stub32_execve
+-12	i386	chdir			sys_chdir
+-13	i386	time			sys_time			compat_sys_time
+-14	i386	mknod			sys_mknod
+-15	i386	chmod			sys_chmod
+-16	i386	lchown			sys_lchown16
+-17	i386	break
+-18	i386	oldstat			sys_stat
+-19	i386	lseek			sys_lseek			compat_sys_lseek
+-20	i386	getpid			sys_getpid
+-21	i386	mount			sys_mount			compat_sys_mount
+-22	i386	umount			sys_oldumount
+-23	i386	setuid			sys_setuid16
+-24	i386	getuid			sys_getuid16
+-25	i386	stime			sys_stime			compat_sys_stime
+-26	i386	ptrace			sys_ptrace			compat_sys_ptrace
+-27	i386	alarm			sys_alarm
+-28	i386	oldfstat		sys_fstat
+-29	i386	pause			sys_pause
+-30	i386	utime			sys_utime			compat_sys_utime
+-31	i386	stty
+-32	i386	gtty
+-33	i386	access			sys_access
+-34	i386	nice			sys_nice
+-35	i386	ftime
+-36	i386	sync			sys_sync
+-37	i386	kill			sys_kill
+-38	i386	rename			sys_rename
+-39	i386	mkdir			sys_mkdir
+-40	i386	rmdir			sys_rmdir
+-41	i386	dup			sys_dup
+-42	i386	pipe			sys_pipe
+-43	i386	times			sys_times			compat_sys_times
+-44	i386	prof
+-45	i386	brk			sys_brk
+-46	i386	setgid			sys_setgid16
+-47	i386	getgid			sys_getgid16
+-48	i386	signal			sys_signal
+-49	i386	geteuid			sys_geteuid16
+-50	i386	getegid			sys_getegid16
+-51	i386	acct			sys_acct
+-52	i386	umount2			sys_umount
+-53	i386	lock
+-54	i386	ioctl			sys_ioctl			compat_sys_ioctl
+-55	i386	fcntl			sys_fcntl			compat_sys_fcntl64
+-56	i386	mpx
+-57	i386	setpgid			sys_setpgid
+-58	i386	ulimit
+-59	i386	oldolduname		sys_olduname
+-60	i386	umask			sys_umask
+-61	i386	chroot			sys_chroot
+-62	i386	ustat			sys_ustat			compat_sys_ustat
+-63	i386	dup2			sys_dup2
+-64	i386	getppid			sys_getppid
+-65	i386	getpgrp			sys_getpgrp
+-66	i386	setsid			sys_setsid
+-67	i386	sigaction		sys_sigaction			compat_sys_sigaction
+-68	i386	sgetmask		sys_sgetmask
+-69	i386	ssetmask		sys_ssetmask
+-70	i386	setreuid		sys_setreuid16
+-71	i386	setregid		sys_setregid16
+-72	i386	sigsuspend		sys_sigsuspend			sys_sigsuspend
+-73	i386	sigpending		sys_sigpending			compat_sys_sigpending
+-74	i386	sethostname		sys_sethostname
+-75	i386	setrlimit		sys_setrlimit			compat_sys_setrlimit
+-76	i386	getrlimit		sys_old_getrlimit		compat_sys_old_getrlimit
+-77	i386	getrusage		sys_getrusage			compat_sys_getrusage
+-78	i386	gettimeofday		sys_gettimeofday		compat_sys_gettimeofday
+-79	i386	settimeofday		sys_settimeofday		compat_sys_settimeofday
+-80	i386	getgroups		sys_getgroups16
+-81	i386	setgroups		sys_setgroups16
+-82	i386	select			sys_old_select			compat_sys_old_select
+-83	i386	symlink			sys_symlink
+-84	i386	oldlstat		sys_lstat
+-85	i386	readlink		sys_readlink
+-86	i386	uselib			sys_uselib
+-87	i386	swapon			sys_swapon
+-88	i386	reboot			sys_reboot
+-89	i386	readdir			sys_old_readdir			compat_sys_old_readdir
+-90	i386	mmap			sys_old_mmap			sys32_mmap
+-91	i386	munmap			sys_munmap
+-92	i386	truncate		sys_truncate			compat_sys_truncate
+-93	i386	ftruncate		sys_ftruncate			compat_sys_ftruncate
+-94	i386	fchmod			sys_fchmod
+-95	i386	fchown			sys_fchown16
+-96	i386	getpriority		sys_getpriority
+-97	i386	setpriority		sys_setpriority
+-98	i386	profil
+-99	i386	statfs			sys_statfs			compat_sys_statfs
+-100	i386	fstatfs			sys_fstatfs			compat_sys_fstatfs
+-101	i386	ioperm			sys_ioperm
+-102	i386	socketcall		sys_socketcall			compat_sys_socketcall
+-103	i386	syslog			sys_syslog
+-104	i386	setitimer		sys_setitimer			compat_sys_setitimer
+-105	i386	getitimer		sys_getitimer			compat_sys_getitimer
+-106	i386	stat			sys_newstat			compat_sys_newstat
+-107	i386	lstat			sys_newlstat			compat_sys_newlstat
+-108	i386	fstat			sys_newfstat			compat_sys_newfstat
+-109	i386	olduname		sys_uname
+-110	i386	iopl			sys_iopl
+-111	i386	vhangup			sys_vhangup
+-112	i386	idle
+-113	i386	vm86old			sys_vm86old			sys32_vm86_warning
+-114	i386	wait4			sys_wait4			compat_sys_wait4
+-115	i386	swapoff			sys_swapoff
+-116	i386	sysinfo			sys_sysinfo			compat_sys_sysinfo
+-117	i386	ipc			sys_ipc				compat_sys_ipc
+-118	i386	fsync			sys_fsync
+-119	i386	sigreturn		sys_sigreturn			stub32_sigreturn
+-120	i386	clone			sys_clone			stub32_clone
+-121	i386	setdomainname		sys_setdomainname
+-122	i386	uname			sys_newuname
+-123	i386	modify_ldt		sys_modify_ldt
+-124	i386	adjtimex		sys_adjtimex			compat_sys_adjtimex
+-125	i386	mprotect		sys_mprotect
+-126	i386	sigprocmask		sys_sigprocmask			compat_sys_sigprocmask
+-127	i386	create_module
+-128	i386	init_module		sys_init_module
+-129	i386	delete_module		sys_delete_module
+-130	i386	get_kernel_syms
+-131	i386	quotactl		sys_quotactl			sys32_quotactl
+-132	i386	getpgid			sys_getpgid
+-133	i386	fchdir			sys_fchdir
+-134	i386	bdflush			sys_bdflush
+-135	i386	sysfs			sys_sysfs
+-136	i386	personality		sys_personality
+-137	i386	afs_syscall
+-138	i386	setfsuid		sys_setfsuid16
+-139	i386	setfsgid		sys_setfsgid16
+-140	i386	_llseek			sys_llseek
+-141	i386	getdents		sys_getdents			compat_sys_getdents
+-142	i386	_newselect		sys_select			compat_sys_select
+-143	i386	flock			sys_flock
+-144	i386	msync			sys_msync
+-145	i386	readv			sys_readv			compat_sys_readv
+-146	i386	writev			sys_writev			compat_sys_writev
+-147	i386	getsid			sys_getsid
+-148	i386	fdatasync		sys_fdatasync
+-149	i386	_sysctl			sys_sysctl			compat_sys_sysctl
+-150	i386	mlock			sys_mlock
+-151	i386	munlock			sys_munlock
+-152	i386	mlockall		sys_mlockall
+-153	i386	munlockall		sys_munlockall
+-154	i386	sched_setparam		sys_sched_setparam
+-155	i386	sched_getparam		sys_sched_getparam
+-156	i386	sched_setscheduler	sys_sched_setscheduler
+-157	i386	sched_getscheduler	sys_sched_getscheduler
+-158	i386	sched_yield		sys_sched_yield
+-159	i386	sched_get_priority_max	sys_sched_get_priority_max
+-160	i386	sched_get_priority_min	sys_sched_get_priority_min
+-161	i386	sched_rr_get_interval	sys_sched_rr_get_interval	compat_sys_sched_rr_get_interval
+-162	i386	nanosleep		sys_nanosleep			compat_sys_nanosleep
+-163	i386	mremap			sys_mremap
+-164	i386	setresuid		sys_setresuid16
+-165	i386	getresuid		sys_getresuid16
+-166	i386	vm86			sys_vm86			sys32_vm86_warning
+-167	i386	query_module
+-168	i386	poll			sys_poll
+-169	i386	nfsservctl
+-170	i386	setresgid		sys_setresgid16
+-171	i386	getresgid		sys_getresgid16
+-172	i386	prctl			sys_prctl
+-173	i386	rt_sigreturn		sys_rt_sigreturn		stub32_rt_sigreturn
+-174	i386	rt_sigaction		sys_rt_sigaction		compat_sys_rt_sigaction
+-175	i386	rt_sigprocmask		sys_rt_sigprocmask
+-176	i386	rt_sigpending		sys_rt_sigpending		compat_sys_rt_sigpending
+-177	i386	rt_sigtimedwait		sys_rt_sigtimedwait		compat_sys_rt_sigtimedwait
+-178	i386	rt_sigqueueinfo		sys_rt_sigqueueinfo		compat_sys_rt_sigqueueinfo
+-179	i386	rt_sigsuspend		sys_rt_sigsuspend
+-180	i386	pread64			sys_pread64			sys32_pread
+-181	i386	pwrite64		sys_pwrite64			sys32_pwrite
+-182	i386	chown			sys_chown16
+-183	i386	getcwd			sys_getcwd
+-184	i386	capget			sys_capget
+-185	i386	capset			sys_capset
+-186	i386	sigaltstack		sys_sigaltstack			compat_sys_sigaltstack
+-187	i386	sendfile		sys_sendfile			compat_sys_sendfile
+-188	i386	getpmsg
+-189	i386	putpmsg
+-190	i386	vfork			sys_vfork			stub32_vfork
+-191	i386	ugetrlimit		sys_getrlimit			compat_sys_getrlimit
+-192	i386	mmap2			sys_mmap_pgoff
+-193	i386	truncate64		sys_truncate64			sys32_truncate64
+-194	i386	ftruncate64		sys_ftruncate64			sys32_ftruncate64
+-195	i386	stat64			sys_stat64			sys32_stat64
+-196	i386	lstat64			sys_lstat64			sys32_lstat64
+-197	i386	fstat64			sys_fstat64			sys32_fstat64
+-198	i386	lchown32		sys_lchown
+-199	i386	getuid32		sys_getuid
+-200	i386	getgid32		sys_getgid
+-201	i386	geteuid32		sys_geteuid
+-202	i386	getegid32		sys_getegid
+-203	i386	setreuid32		sys_setreuid
+-204	i386	setregid32		sys_setregid
+-205	i386	getgroups32		sys_getgroups
+-206	i386	setgroups32		sys_setgroups
+-207	i386	fchown32		sys_fchown
+-208	i386	setresuid32		sys_setresuid
+-209	i386	getresuid32		sys_getresuid
+-210	i386	setresgid32		sys_setresgid
+-211	i386	getresgid32		sys_getresgid
+-212	i386	chown32			sys_chown
+-213	i386	setuid32		sys_setuid
+-214	i386	setgid32		sys_setgid
+-215	i386	setfsuid32		sys_setfsuid
+-216	i386	setfsgid32		sys_setfsgid
+-217	i386	pivot_root		sys_pivot_root
+-218	i386	mincore			sys_mincore
+-219	i386	madvise			sys_madvise
+-220	i386	getdents64		sys_getdents64			compat_sys_getdents64
+-221	i386	fcntl64			sys_fcntl64			compat_sys_fcntl64
++0       i386    restart_syscall         sys_restart_syscall
++1       i386    exit                    sys_exit
++2       i386    fork                    sys_fork                        stub32_fork
++3       i386    read                    sys_read
++4       i386    write                   sys_write
++5       i386    open                    sys_open                        compat_sys_open
++6       i386    close                   sys_close
++7       i386    waitpid                 sys_waitpid                     sys32_waitpid
++8       i386    creat                   sys_creat
++9       i386    link                    sys_link
++10      i386    unlink                  sys_unlink
++11      i386    execve                  sys_execve                      stub32_execve
++12      i386    chdir                   sys_chdir
++13      i386    time                    sys_time                        compat_sys_time
++14      i386    mknod                   sys_mknod
++15      i386    chmod                   sys_chmod
++16      i386    lchown                  sys_lchown16
++17      i386    break
++18      i386    oldstat                 sys_stat
++19      i386    lseek                   sys_lseek                       compat_sys_lseek
++20      i386    getpid                  sys_getpid
++21      i386    mount                   sys_mount                       compat_sys_mount
++22      i386    umount                  sys_oldumount
++23      i386    setuid                  sys_setuid16
++24      i386    getuid                  sys_getuid16
++25      i386    stime                   sys_stime                       compat_sys_stime
++26      i386    ptrace                  sys_ptrace                      compat_sys_ptrace
++27      i386    alarm                   sys_alarm
++28      i386    oldfstat                sys_fstat
++29      i386    pause                   sys_pause
++30      i386    utime                   sys_utime                       compat_sys_utime
++31      i386    stty
++32      i386    gtty
++33      i386    access                  sys_access
++34      i386    nice                    sys_nice
++35      i386    ftime
++36      i386    sync                    sys_sync
++37      i386    kill                    sys_kill
++38      i386    rename                  sys_rename
++39      i386    mkdir                   sys_mkdir
++40      i386    rmdir                   sys_rmdir
++41      i386    dup                     sys_dup
++42      i386    pipe                    sys_pipe
++43      i386    times                   sys_times                       compat_sys_times
++44      i386    prof
++45      i386    brk                     sys_brk
++46      i386    setgid                  sys_setgid16
++47      i386    getgid                  sys_getgid16
++48      i386    signal                  sys_signal
++49      i386    geteuid                 sys_geteuid16
++50      i386    getegid                 sys_getegid16
++51      i386    acct                    sys_acct
++52      i386    umount2                 sys_umount
++53      i386    lock
++54      i386    ioctl                   sys_ioctl                       compat_sys_ioctl
++55      i386    fcntl                   sys_fcntl                       compat_sys_fcntl64
++56      i386    mpx
++57      i386    setpgid                 sys_setpgid
++58      i386    ulimit
++59      i386    oldolduname             sys_olduname
++60      i386    umask                   sys_umask
++61      i386    chroot                  sys_chroot
++62      i386    ustat                   sys_ustat                       compat_sys_ustat
++63      i386    dup2                    sys_dup2
++64      i386    getppid                 sys_getppid
++65      i386    getpgrp                 sys_getpgrp
++66      i386    setsid                  sys_setsid
++67      i386    sigaction               sys_sigaction                   compat_sys_sigaction
++68      i386    sgetmask                sys_sgetmask
++69      i386    ssetmask                sys_ssetmask
++70      i386    setreuid                sys_setreuid16
++71      i386    setregid                sys_setregid16
++72      i386    sigsuspend              sys_sigsuspend                  sys_sigsuspend
++73      i386    sigpending              sys_sigpending                  compat_sys_sigpending
++74      i386    sethostname             sys_sethostname
++75      i386    setrlimit               sys_setrlimit                   compat_sys_setrlimit
++76      i386    getrlimit               sys_old_getrlimit               compat_sys_old_getrlimit
++77      i386    getrusage               sys_getrusage                   compat_sys_getrusage
++78      i386    gettimeofday            sys_gettimeofday                compat_sys_gettimeofday
++79      i386    settimeofday            sys_settimeofday                compat_sys_settimeofday
++80      i386    getgroups               sys_getgroups16
++81      i386    setgroups               sys_setgroups16
++82      i386    select                  sys_old_select                  compat_sys_old_select
++83      i386    symlink                 sys_symlink
++84      i386    oldlstat                sys_lstat
++85      i386    readlink                sys_readlink
++86      i386    uselib                  sys_uselib
++87      i386    swapon                  sys_swapon
++88      i386    reboot                  sys_reboot
++89      i386    readdir                 sys_old_readdir                 compat_sys_old_readdir
++90      i386    mmap                    sys_old_mmap                    sys32_mmap
++91      i386    munmap                  sys_munmap
++92      i386    truncate                sys_truncate                    compat_sys_truncate
++93      i386    ftruncate               sys_ftruncate                   compat_sys_ftruncate
++94      i386    fchmod                  sys_fchmod
++95      i386    fchown                  sys_fchown16
++96      i386    getpriority             sys_getpriority
++97      i386    setpriority             sys_setpriority
++98      i386    profil
++99      i386    statfs                  sys_statfs                      compat_sys_statfs
++100     i386    fstatfs                 sys_fstatfs                     compat_sys_fstatfs
++101     i386    ioperm                  sys_ioperm
++102     i386    socketcall              sys_socketcall                  compat_sys_socketcall
++103     i386    syslog                  sys_syslog
++104     i386    setitimer               sys_setitimer                   compat_sys_setitimer
++105     i386    getitimer               sys_getitimer                   compat_sys_getitimer
++106     i386    stat                    sys_newstat                     compat_sys_newstat
++107     i386    lstat                   sys_newlstat                    compat_sys_newlstat
++108     i386    fstat                   sys_newfstat                    compat_sys_newfstat
++109     i386    olduname                sys_uname
++110     i386    iopl                    sys_iopl
++111     i386    vhangup                 sys_vhangup
++112     i386    idle
++113     i386    vm86old                 sys_vm86old                     sys32_vm86_warning
++114     i386    wait4                   sys_wait4                       compat_sys_wait4
++115     i386    swapoff                 sys_swapoff
++116     i386    sysinfo                 sys_sysinfo                     compat_sys_sysinfo
++117     i386    ipc                     sys_ipc                         compat_sys_ipc
++118     i386    fsync                   sys_fsync
++119     i386    sigreturn               sys_sigreturn                   stub32_sigreturn
++120     i386    clone                   sys_clone                       stub32_clone
++121     i386    setdomainname           sys_setdomainname
++122     i386    uname                   sys_newuname
++123     i386    modify_ldt              sys_modify_ldt
++124     i386    adjtimex                sys_adjtimex                    compat_sys_adjtimex
++125     i386    mprotect                sys_mprotect
++126     i386    sigprocmask             sys_sigprocmask                 compat_sys_sigprocmask
++127     i386    create_module
++128     i386    init_module             sys_init_module
++129     i386    delete_module           sys_delete_module
++130     i386    get_kernel_syms
++131     i386    quotactl                sys_quotactl                    sys32_quotactl
++132     i386    getpgid                 sys_getpgid
++133     i386    fchdir                  sys_fchdir
++134     i386    bdflush                 sys_bdflush
++135     i386    sysfs                   sys_sysfs
++136     i386    personality             sys_personality
++137     i386    afs_syscall
++138     i386    setfsuid                sys_setfsuid16
++139     i386    setfsgid                sys_setfsgid16
++140     i386    _llseek                 sys_llseek
++141     i386    getdents                sys_getdents                    compat_sys_getdents
++142     i386    _newselect              sys_select                      compat_sys_select
++143     i386    flock                   sys_flock
++144     i386    msync                   sys_msync
++145     i386    readv                   sys_readv                       compat_sys_readv
++146     i386    writev                  sys_writev                      compat_sys_writev
++147     i386    getsid                  sys_getsid
++148     i386    fdatasync               sys_fdatasync
++149     i386    _sysctl                 sys_sysctl                      compat_sys_sysctl
++150     i386    mlock                   sys_mlock
++151     i386    munlock                 sys_munlock
++152     i386    mlockall                sys_mlockall
++153     i386    munlockall              sys_munlockall
++154     i386    sched_setparam          sys_sched_setparam
++155     i386    sched_getparam          sys_sched_getparam
++156     i386    sched_setscheduler      sys_sched_setscheduler
++157     i386    sched_getscheduler      sys_sched_getscheduler
++158     i386    sched_yield             sys_sched_yield
++159     i386    sched_get_priority_max  sys_sched_get_priority_max
++160     i386    sched_get_priority_min  sys_sched_get_priority_min
++161     i386    sched_rr_get_interval   sys_sched_rr_get_interval       compat_sys_sched_rr_get_interval
++162     i386    nanosleep               sys_nanosleep                   compat_sys_nanosleep
++163     i386    mremap                  sys_mremap
++164     i386    setresuid               sys_setresuid16
++165     i386    getresuid               sys_getresuid16
++166     i386    vm86                    sys_vm86                        sys32_vm86_warning
++167     i386    query_module
++168     i386    poll                    sys_poll
++169     i386    nfsservctl
++170     i386    setresgid               sys_setresgid16
++171     i386    getresgid               sys_getresgid16
++172     i386    prctl                   sys_prctl
++173     i386    rt_sigreturn            sys_rt_sigreturn                stub32_rt_sigreturn
++174     i386    rt_sigaction            sys_rt_sigaction                compat_sys_rt_sigaction
++175     i386    rt_sigprocmask          sys_rt_sigprocmask
++176     i386    rt_sigpending           sys_rt_sigpending               compat_sys_rt_sigpending
++177     i386    rt_sigtimedwait         sys_rt_sigtimedwait             compat_sys_rt_sigtimedwait
++178     i386    rt_sigqueueinfo         sys_rt_sigqueueinfo             compat_sys_rt_sigqueueinfo
++179     i386    rt_sigsuspend           sys_rt_sigsuspend
++180     i386    pread64                 sys_pread64                     sys32_pread
++181     i386    pwrite64                sys_pwrite64                    sys32_pwrite
++182     i386    chown                   sys_chown16
++183     i386    getcwd                  sys_getcwd
++184     i386    capget                  sys_capget
++185     i386    capset                  sys_capset
++186     i386    sigaltstack             sys_sigaltstack                 compat_sys_sigaltstack
++187     i386    sendfile                sys_sendfile                    compat_sys_sendfile
++188     i386    getpmsg
++189     i386    putpmsg
++190     i386    vfork                   sys_vfork                       stub32_vfork
++191     i386    ugetrlimit              sys_getrlimit                   compat_sys_getrlimit
++192     i386    mmap2                   sys_mmap_pgoff
++193     i386    truncate64              sys_truncate64                  sys32_truncate64
++194     i386    ftruncate64             sys_ftruncate64                 sys32_ftruncate64
++195     i386    stat64                  sys_stat64                      sys32_stat64
++196     i386    lstat64                 sys_lstat64                     sys32_lstat64
++197     i386    fstat64                 sys_fstat64                     sys32_fstat64
++198     i386    lchown32                sys_lchown
++199     i386    getuid32                sys_getuid
++200     i386    getgid32                sys_getgid
++201     i386    geteuid32               sys_geteuid
++202     i386    getegid32               sys_getegid
++203     i386    setreuid32              sys_setreuid
++204     i386    setregid32              sys_setregid
++205     i386    getgroups32             sys_getgroups
++206     i386    setgroups32             sys_setgroups
++207     i386    fchown32                sys_fchown
++208     i386    setresuid32             sys_setresuid
++209     i386    getresuid32             sys_getresuid
++210     i386    setresgid32             sys_setresgid
++211     i386    getresgid32             sys_getresgid
++212     i386    chown32                 sys_chown
++213     i386    setuid32                sys_setuid
++214     i386    setgid32                sys_setgid
++215     i386    setfsuid32              sys_setfsuid
++216     i386    setfsgid32              sys_setfsgid
++217     i386    pivot_root              sys_pivot_root
++218     i386    mincore                 sys_mincore
++219     i386    madvise                 sys_madvise
++220     i386    getdents64              sys_getdents64                  compat_sys_getdents64
++221     i386    fcntl64                 sys_fcntl64                     compat_sys_fcntl64
+ # 222 is unused
+ # 223 is unused
+-224	i386	gettid			sys_gettid
+-225	i386	readahead		sys_readahead			sys32_readahead
+-226	i386	setxattr		sys_setxattr
+-227	i386	lsetxattr		sys_lsetxattr
+-228	i386	fsetxattr		sys_fsetxattr
+-229	i386	getxattr		sys_getxattr
+-230	i386	lgetxattr		sys_lgetxattr
+-231	i386	fgetxattr		sys_fgetxattr
+-232	i386	listxattr		sys_listxattr
+-233	i386	llistxattr		sys_llistxattr
+-234	i386	flistxattr		sys_flistxattr
+-235	i386	removexattr		sys_removexattr
+-236	i386	lremovexattr		sys_lremovexattr
+-237	i386	fremovexattr		sys_fremovexattr
+-238	i386	tkill			sys_tkill
+-239	i386	sendfile64		sys_sendfile64
+-240	i386	futex			sys_futex			compat_sys_futex
+-241	i386	sched_setaffinity	sys_sched_setaffinity		compat_sys_sched_setaffinity
+-242	i386	sched_getaffinity	sys_sched_getaffinity		compat_sys_sched_getaffinity
+-243	i386	set_thread_area		sys_set_thread_area
+-244	i386	get_thread_area		sys_get_thread_area
+-245	i386	io_setup		sys_io_setup			compat_sys_io_setup
+-246	i386	io_destroy		sys_io_destroy
+-247	i386	io_getevents		sys_io_getevents		compat_sys_io_getevents
+-248	i386	io_submit		sys_io_submit			compat_sys_io_submit
+-249	i386	io_cancel		sys_io_cancel
+-250	i386	fadvise64		sys_fadvise64			sys32_fadvise64
++224     i386    gettid                  sys_gettid
++225     i386    readahead               sys_readahead                   sys32_readahead
++226     i386    setxattr                sys_setxattr
++227     i386    lsetxattr               sys_lsetxattr
++228     i386    fsetxattr               sys_fsetxattr
++229     i386    getxattr                sys_getxattr
++230     i386    lgetxattr               sys_lgetxattr
++231     i386    fgetxattr               sys_fgetxattr
++232     i386    listxattr               sys_listxattr
++233     i386    llistxattr              sys_llistxattr
++234     i386    flistxattr              sys_flistxattr
++235     i386    removexattr             sys_removexattr
++236     i386    lremovexattr            sys_lremovexattr
++237     i386    fremovexattr            sys_fremovexattr
++238     i386    tkill                   sys_tkill
++239     i386    sendfile64              sys_sendfile64
++240     i386    futex                   sys_futex                       compat_sys_futex
++241     i386    sched_setaffinity       sys_sched_setaffinity           compat_sys_sched_setaffinity
++242     i386    sched_getaffinity       sys_sched_getaffinity           compat_sys_sched_getaffinity
++243     i386    set_thread_area         sys_set_thread_area
++244     i386    get_thread_area         sys_get_thread_area
++245     i386    io_setup                sys_io_setup                    compat_sys_io_setup
++246     i386    io_destroy              sys_io_destroy
++247     i386    io_getevents            sys_io_getevents                compat_sys_io_getevents
++248     i386    io_submit               sys_io_submit                   compat_sys_io_submit
++249     i386    io_cancel               sys_io_cancel
++250     i386    fadvise64               sys_fadvise64                   sys32_fadvise64
+ # 251 is available for reuse (was briefly sys_set_zone_reclaim)
+-252	i386	exit_group		sys_exit_group
+-253	i386	lookup_dcookie		sys_lookup_dcookie		compat_sys_lookup_dcookie
+-254	i386	epoll_create		sys_epoll_create
+-255	i386	epoll_ctl		sys_epoll_ctl
+-256	i386	epoll_wait		sys_epoll_wait
+-257	i386	remap_file_pages	sys_remap_file_pages
+-258	i386	set_tid_address		sys_set_tid_address
+-259	i386	timer_create		sys_timer_create		compat_sys_timer_create
+-260	i386	timer_settime		sys_timer_settime		compat_sys_timer_settime
+-261	i386	timer_gettime		sys_timer_gettime		compat_sys_timer_gettime
+-262	i386	timer_getoverrun	sys_timer_getoverrun
+-263	i386	timer_delete		sys_timer_delete
+-264	i386	clock_settime		sys_clock_settime		compat_sys_clock_settime
+-265	i386	clock_gettime		sys_clock_gettime		compat_sys_clock_gettime
+-266	i386	clock_getres		sys_clock_getres		compat_sys_clock_getres
+-267	i386	clock_nanosleep		sys_clock_nanosleep		compat_sys_clock_nanosleep
+-268	i386	statfs64		sys_statfs64			compat_sys_statfs64
+-269	i386	fstatfs64		sys_fstatfs64			compat_sys_fstatfs64
+-270	i386	tgkill			sys_tgkill
+-271	i386	utimes			sys_utimes			compat_sys_utimes
+-272	i386	fadvise64_64		sys_fadvise64_64		sys32_fadvise64_64
+-273	i386	vserver
+-274	i386	mbind			sys_mbind
+-275	i386	get_mempolicy		sys_get_mempolicy		compat_sys_get_mempolicy
+-276	i386	set_mempolicy		sys_set_mempolicy
+-277	i386	mq_open			sys_mq_open			compat_sys_mq_open
+-278	i386	mq_unlink		sys_mq_unlink
+-279	i386	mq_timedsend		sys_mq_timedsend		compat_sys_mq_timedsend
+-280	i386	mq_timedreceive		sys_mq_timedreceive		compat_sys_mq_timedreceive
+-281	i386	mq_notify		sys_mq_notify			compat_sys_mq_notify
+-282	i386	mq_getsetattr		sys_mq_getsetattr		compat_sys_mq_getsetattr
+-283	i386	kexec_load		sys_kexec_load			compat_sys_kexec_load
+-284	i386	waitid			sys_waitid			compat_sys_waitid
++252     i386    exit_group              sys_exit_group
++253     i386    lookup_dcookie          sys_lookup_dcookie              compat_sys_lookup_dcookie
++254     i386    epoll_create            sys_epoll_create
++255     i386    epoll_ctl               sys_epoll_ctl
++256     i386    epoll_wait              sys_epoll_wait
++257     i386    remap_file_pages        sys_remap_file_pages
++258     i386    set_tid_address         sys_set_tid_address
++259     i386    timer_create            sys_timer_create                compat_sys_timer_create
++260     i386    timer_settime           sys_timer_settime               compat_sys_timer_settime
++261     i386    timer_gettime           sys_timer_gettime               compat_sys_timer_gettime
++262     i386    timer_getoverrun        sys_timer_getoverrun
++263     i386    timer_delete            sys_timer_delete
++264     i386    clock_settime           sys_clock_settime               compat_sys_clock_settime
++265     i386    clock_gettime           sys_clock_gettime               compat_sys_clock_gettime
++266     i386    clock_getres            sys_clock_getres                compat_sys_clock_getres
++267     i386    clock_nanosleep         sys_clock_nanosleep             compat_sys_clock_nanosleep
++268     i386    statfs64                sys_statfs64                    compat_sys_statfs64
++269     i386    fstatfs64               sys_fstatfs64                   compat_sys_fstatfs64
++270     i386    tgkill                  sys_tgkill
++271     i386    utimes                  sys_utimes                      compat_sys_utimes
++272     i386    fadvise64_64            sys_fadvise64_64                sys32_fadvise64_64
++273     i386    vserver
++274     i386    mbind                   sys_mbind
++275     i386    get_mempolicy           sys_get_mempolicy               compat_sys_get_mempolicy
++276     i386    set_mempolicy           sys_set_mempolicy
++277     i386    mq_open                 sys_mq_open                     compat_sys_mq_open
++278     i386    mq_unlink               sys_mq_unlink
++279     i386    mq_timedsend            sys_mq_timedsend                compat_sys_mq_timedsend
++280     i386    mq_timedreceive         sys_mq_timedreceive             compat_sys_mq_timedreceive
++281     i386    mq_notify               sys_mq_notify                   compat_sys_mq_notify
++282     i386    mq_getsetattr           sys_mq_getsetattr               compat_sys_mq_getsetattr
++283     i386    kexec_load              sys_kexec_load                  compat_sys_kexec_load
++284     i386    waitid                  sys_waitid                      compat_sys_waitid
+ # 285 sys_setaltroot
+-286	i386	add_key			sys_add_key
+-287	i386	request_key		sys_request_key
+-288	i386	keyctl			sys_keyctl
+-289	i386	ioprio_set		sys_ioprio_set
+-290	i386	ioprio_get		sys_ioprio_get
+-291	i386	inotify_init		sys_inotify_init
+-292	i386	inotify_add_watch	sys_inotify_add_watch
+-293	i386	inotify_rm_watch	sys_inotify_rm_watch
+-294	i386	migrate_pages		sys_migrate_pages
+-295	i386	openat			sys_openat			compat_sys_openat
+-296	i386	mkdirat			sys_mkdirat
+-297	i386	mknodat			sys_mknodat
+-298	i386	fchownat		sys_fchownat
+-299	i386	futimesat		sys_futimesat			compat_sys_futimesat
+-300	i386	fstatat64		sys_fstatat64			sys32_fstatat
+-301	i386	unlinkat		sys_unlinkat
+-302	i386	renameat		sys_renameat
+-303	i386	linkat			sys_linkat
+-304	i386	symlinkat		sys_symlinkat
+-305	i386	readlinkat		sys_readlinkat
+-306	i386	fchmodat		sys_fchmodat
+-307	i386	faccessat		sys_faccessat
+-308	i386	pselect6		sys_pselect6			compat_sys_pselect6
+-309	i386	ppoll			sys_ppoll			compat_sys_ppoll
+-310	i386	unshare			sys_unshare
+-311	i386	set_robust_list		sys_set_robust_list		compat_sys_set_robust_list
+-312	i386	get_robust_list		sys_get_robust_list		compat_sys_get_robust_list
+-313	i386	splice			sys_splice
+-314	i386	sync_file_range		sys_sync_file_range		sys32_sync_file_range
+-315	i386	tee			sys_tee
+-316	i386	vmsplice		sys_vmsplice			compat_sys_vmsplice
+-317	i386	move_pages		sys_move_pages			compat_sys_move_pages
+-318	i386	getcpu			sys_getcpu
+-319	i386	epoll_pwait		sys_epoll_pwait
+-320	i386	utimensat		sys_utimensat			compat_sys_utimensat
+-321	i386	signalfd		sys_signalfd			compat_sys_signalfd
+-322	i386	timerfd_create		sys_timerfd_create
+-323	i386	eventfd			sys_eventfd
+-324	i386	fallocate		sys_fallocate			sys32_fallocate
+-325	i386	timerfd_settime		sys_timerfd_settime		compat_sys_timerfd_settime
+-326	i386	timerfd_gettime		sys_timerfd_gettime		compat_sys_timerfd_gettime
+-327	i386	signalfd4		sys_signalfd4			compat_sys_signalfd4
+-328	i386	eventfd2		sys_eventfd2
+-329	i386	epoll_create1		sys_epoll_create1
+-330	i386	dup3			sys_dup3
+-331	i386	pipe2			sys_pipe2
+-332	i386	inotify_init1		sys_inotify_init1
+-333	i386	preadv			sys_preadv			compat_sys_preadv
+-334	i386	pwritev			sys_pwritev			compat_sys_pwritev
+-335	i386	rt_tgsigqueueinfo	sys_rt_tgsigqueueinfo		compat_sys_rt_tgsigqueueinfo
+-336	i386	perf_event_open		sys_perf_event_open
+-337	i386	recvmmsg		sys_recvmmsg			compat_sys_recvmmsg
+-338	i386	fanotify_init		sys_fanotify_init
+-339	i386	fanotify_mark		sys_fanotify_mark		compat_sys_fanotify_mark
+-340	i386	prlimit64		sys_prlimit64
+-341	i386	name_to_handle_at	sys_name_to_handle_at
+-342	i386	open_by_handle_at	sys_open_by_handle_at		compat_sys_open_by_handle_at
+-343	i386	clock_adjtime		sys_clock_adjtime		compat_sys_clock_adjtime
+-344	i386	syncfs			sys_syncfs
+-345	i386	sendmmsg		sys_sendmmsg			compat_sys_sendmmsg
+-346	i386	setns			sys_setns
+-347	i386	process_vm_readv	sys_process_vm_readv		compat_sys_process_vm_readv
+-348	i386	process_vm_writev	sys_process_vm_writev		compat_sys_process_vm_writev
+-349	i386	kcmp			sys_kcmp
+-350	i386	finit_module		sys_finit_module
+-351	i386	sched_setattr		sys_sched_setattr
+-352	i386	sched_getattr		sys_sched_getattr
++286     i386    add_key                 sys_add_key
++287     i386    request_key             sys_request_key
++288     i386    keyctl                  sys_keyctl
++289     i386    ioprio_set              sys_ioprio_set
++290     i386    ioprio_get              sys_ioprio_get
++291     i386    inotify_init            sys_inotify_init
++292     i386    inotify_add_watch       sys_inotify_add_watch
++293     i386    inotify_rm_watch        sys_inotify_rm_watch
++294     i386    migrate_pages           sys_migrate_pages
++295     i386    openat                  sys_openat                      compat_sys_openat
++296     i386    mkdirat                 sys_mkdirat
++297     i386    mknodat                 sys_mknodat
++298     i386    fchownat                sys_fchownat
++299     i386    futimesat               sys_futimesat                   compat_sys_futimesat
++300     i386    fstatat64               sys_fstatat64                   sys32_fstatat
++301     i386    unlinkat                sys_unlinkat
++302     i386    renameat                sys_renameat
++303     i386    linkat                  sys_linkat
++304     i386    symlinkat               sys_symlinkat
++305     i386    readlinkat              sys_readlinkat
++306     i386    fchmodat                sys_fchmodat
++307     i386    faccessat               sys_faccessat
++308     i386    pselect6                sys_pselect6                    compat_sys_pselect6
++309     i386    ppoll                   sys_ppoll                       compat_sys_ppoll
++310     i386    unshare                 sys_unshare
++311     i386    set_robust_list         sys_set_robust_list             compat_sys_set_robust_list
++312     i386    get_robust_list         sys_get_robust_list             compat_sys_get_robust_list
++313     i386    splice                  sys_splice
++314     i386    sync_file_range         sys_sync_file_range             sys32_sync_file_range
++315     i386    tee                     sys_tee
++316     i386    vmsplice                sys_vmsplice                    compat_sys_vmsplice
++317     i386    move_pages              sys_move_pages                  compat_sys_move_pages
++318     i386    getcpu                  sys_getcpu
++319     i386    epoll_pwait             sys_epoll_pwait
++320     i386    utimensat               sys_utimensat                   compat_sys_utimensat
++321     i386    signalfd                sys_signalfd                    compat_sys_signalfd
++322     i386    timerfd_create          sys_timerfd_create
++323     i386    eventfd                 sys_eventfd
++324     i386    fallocate               sys_fallocate                   sys32_fallocate
++325     i386    timerfd_settime         sys_timerfd_settime             compat_sys_timerfd_settime
++326     i386    timerfd_gettime         sys_timerfd_gettime             compat_sys_timerfd_gettime
++327     i386    signalfd4               sys_signalfd4                   compat_sys_signalfd4
++328     i386    eventfd2                sys_eventfd2
++329     i386    epoll_create1           sys_epoll_create1
++330     i386    dup3                    sys_dup3
++331     i386    pipe2                   sys_pipe2
++332     i386    inotify_init1           sys_inotify_init1
++333     i386    preadv                  sys_preadv                      compat_sys_preadv
++334     i386    pwritev                 sys_pwritev                     compat_sys_pwritev
++335     i386    rt_tgsigqueueinfo       sys_rt_tgsigqueueinfo           compat_sys_rt_tgsigqueueinfo
++336     i386    perf_event_open         sys_perf_event_open
++337     i386    recvmmsg                sys_recvmmsg                    compat_sys_recvmmsg
++338     i386    fanotify_init           sys_fanotify_init
++339     i386    fanotify_mark           sys_fanotify_mark               compat_sys_fanotify_mark
++340     i386    prlimit64               sys_prlimit64
++341     i386    name_to_handle_at       sys_name_to_handle_at
++342     i386    open_by_handle_at       sys_open_by_handle_at           compat_sys_open_by_handle_at
++343     i386    clock_adjtime           sys_clock_adjtime               compat_sys_clock_adjtime
++344     i386    syncfs                  sys_syncfs
++345     i386    sendmmsg                sys_sendmmsg                    compat_sys_sendmmsg
++346     i386    setns                   sys_setns
++347     i386    process_vm_readv        sys_process_vm_readv            compat_sys_process_vm_readv
++348     i386    process_vm_writev       sys_process_vm_writev           compat_sys_process_vm_writev
++349     i386    kcmp                    sys_kcmp
++350     i386    finit_module            sys_finit_module
++351     i386    sched_setattr           sys_sched_setattr
++352     i386    sched_getattr           sys_sched_getattr
++353     i386    total_memory            sys_total_memory
++354     i386    free_memory             sys_free_memory
++355     i386    slob_largest_free_block_size      sys_slob_largest_free_block_size
+--- orgLin/linux-yocto-3.14/include/linux/syscalls.h	2017-06-09 16:06:32.328483810 -0700
++++ linux-yocto-3.14/include/linux/syscalls.h	2017-06-09 13:58:29.995711371 -0700
+@@ -97,80 +97,80 @@
+ #define __MAP6(m,t,a,...) m(t,a), __MAP5(m,__VA_ARGS__)
+ #define __MAP(n,...) __MAP##n(__VA_ARGS__)
+ 
+-#define __SC_DECL(t, a)	t a
++#define __SC_DECL(t, a) t a
+ #define __TYPE_IS_LL(t) (__same_type((t)0, 0LL) || __same_type((t)0, 0ULL))
+ #define __SC_LONG(t, a) __typeof(__builtin_choose_expr(__TYPE_IS_LL(t), 0LL, 0L)) a
+-#define __SC_CAST(t, a)	(t) a
+-#define __SC_ARGS(t, a)	a
++#define __SC_CAST(t, a) (t) a
++#define __SC_ARGS(t, a) a
+ #define __SC_TEST(t, a) (void)BUILD_BUG_ON_ZERO(!__TYPE_IS_LL(t) && sizeof(t) > sizeof(long))
+ 
+ #ifdef CONFIG_FTRACE_SYSCALLS
+-#define __SC_STR_ADECL(t, a)	#a
+-#define __SC_STR_TDECL(t, a)	#t
++#define __SC_STR_ADECL(t, a)    #a
++#define __SC_STR_TDECL(t, a)    #t
+ 
+ extern struct ftrace_event_class event_class_syscall_enter;
+ extern struct ftrace_event_class event_class_syscall_exit;
+ extern struct trace_event_functions enter_syscall_print_funcs;
+ extern struct trace_event_functions exit_syscall_print_funcs;
+ 
+-#define SYSCALL_TRACE_ENTER_EVENT(sname)				\
+-	static struct syscall_metadata __syscall_meta_##sname;		\
+-	static struct ftrace_event_call __used				\
+-	  event_enter_##sname = {					\
+-		.name                   = "sys_enter"#sname,		\
+-		.class			= &event_class_syscall_enter,	\
+-		.event.funcs            = &enter_syscall_print_funcs,	\
+-		.data			= (void *)&__syscall_meta_##sname,\
+-		.flags                  = TRACE_EVENT_FL_CAP_ANY,	\
+-	};								\
+-	static struct ftrace_event_call __used				\
+-	  __attribute__((section("_ftrace_events")))			\
+-	 *__event_enter_##sname = &event_enter_##sname;
+-
+-#define SYSCALL_TRACE_EXIT_EVENT(sname)					\
+-	static struct syscall_metadata __syscall_meta_##sname;		\
+-	static struct ftrace_event_call __used				\
+-	  event_exit_##sname = {					\
+-		.name                   = "sys_exit"#sname,		\
+-		.class			= &event_class_syscall_exit,	\
+-		.event.funcs		= &exit_syscall_print_funcs,	\
+-		.data			= (void *)&__syscall_meta_##sname,\
+-		.flags                  = TRACE_EVENT_FL_CAP_ANY,	\
+-	};								\
+-	static struct ftrace_event_call __used				\
+-	  __attribute__((section("_ftrace_events")))			\
+-	*__event_exit_##sname = &event_exit_##sname;
+-
+-#define SYSCALL_METADATA(sname, nb, ...)			\
+-	static const char *types_##sname[] = {			\
+-		__MAP(nb,__SC_STR_TDECL,__VA_ARGS__)		\
+-	};							\
+-	static const char *args_##sname[] = {			\
+-		__MAP(nb,__SC_STR_ADECL,__VA_ARGS__)		\
+-	};							\
+-	SYSCALL_TRACE_ENTER_EVENT(sname);			\
+-	SYSCALL_TRACE_EXIT_EVENT(sname);			\
+-	static struct syscall_metadata __used			\
+-	  __syscall_meta_##sname = {				\
+-		.name 		= "sys"#sname,			\
+-		.syscall_nr	= -1,	/* Filled in at boot */	\
+-		.nb_args 	= nb,				\
+-		.types		= nb ? types_##sname : NULL,	\
+-		.args		= nb ? args_##sname : NULL,	\
+-		.enter_event	= &event_enter_##sname,		\
+-		.exit_event	= &event_exit_##sname,		\
+-		.enter_fields	= LIST_HEAD_INIT(__syscall_meta_##sname.enter_fields), \
+-	};							\
+-	static struct syscall_metadata __used			\
+-	  __attribute__((section("__syscalls_metadata")))	\
+-	 *__p_syscall_meta_##sname = &__syscall_meta_##sname;
++#define SYSCALL_TRACE_ENTER_EVENT(sname)                                \
++        static struct syscall_metadata __syscall_meta_##sname;          \
++        static struct ftrace_event_call __used                          \
++          event_enter_##sname = {                                       \
++                .name                   = "sys_enter"#sname,            \
++                .class                  = &event_class_syscall_enter,   \
++                .event.funcs            = &enter_syscall_print_funcs,   \
++                .data                   = (void *)&__syscall_meta_##sname,\
++                .flags                  = TRACE_EVENT_FL_CAP_ANY,       \
++        };                                                              \
++        static struct ftrace_event_call __used                          \
++          __attribute__((section("_ftrace_events")))                    \
++         *__event_enter_##sname = &event_enter_##sname;
++
++#define SYSCALL_TRACE_EXIT_EVENT(sname)                                 \
++        static struct syscall_metadata __syscall_meta_##sname;          \
++        static struct ftrace_event_call __used                          \
++          event_exit_##sname = {                                        \
++                .name                   = "sys_exit"#sname,             \
++                .class                  = &event_class_syscall_exit,    \
++                .event.funcs            = &exit_syscall_print_funcs,    \
++                .data                   = (void *)&__syscall_meta_##sname,\
++                .flags                  = TRACE_EVENT_FL_CAP_ANY,       \
++        };                                                              \
++        static struct ftrace_event_call __used                          \
++          __attribute__((section("_ftrace_events")))                    \
++        *__event_exit_##sname = &event_exit_##sname;
++
++#define SYSCALL_METADATA(sname, nb, ...)                        \
++        static const char *types_##sname[] = {                  \
++                __MAP(nb,__SC_STR_TDECL,__VA_ARGS__)            \
++        };                                                      \
++        static const char *args_##sname[] = {                   \
++                __MAP(nb,__SC_STR_ADECL,__VA_ARGS__)            \
++        };                                                      \
++        SYSCALL_TRACE_ENTER_EVENT(sname);                       \
++        SYSCALL_TRACE_EXIT_EVENT(sname);                        \
++        static struct syscall_metadata __used                   \
++          __syscall_meta_##sname = {                            \
++                .name           = "sys"#sname,                  \
++                .syscall_nr     = -1,   /* Filled in at boot */ \
++                .nb_args        = nb,                           \
++                .types          = nb ? types_##sname : NULL,    \
++                .args           = nb ? args_##sname : NULL,     \
++                .enter_event    = &event_enter_##sname,         \
++                .exit_event     = &event_exit_##sname,          \
++                .enter_fields   = LIST_HEAD_INIT(__syscall_meta_##sname.enter_fields), \
++        };                                                      \
++        static struct syscall_metadata __used                   \
++          __attribute__((section("__syscalls_metadata")))       \
++         *__p_syscall_meta_##sname = &__syscall_meta_##sname;
+ #else
+ #define SYSCALL_METADATA(sname, nb, ...)
+ #endif
+ 
+-#define SYSCALL_DEFINE0(sname)					\
+-	SYSCALL_METADATA(_##sname, 0);				\
+-	asmlinkage long sys_##sname(void)
++#define SYSCALL_DEFINE0(sname)                                  \
++        SYSCALL_METADATA(_##sname, 0);                          \
++        asmlinkage long sys_##sname(void)
+ 
+ #define SYSCALL_DEFINE1(name, ...) SYSCALL_DEFINEx(1, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE2(name, ...) SYSCALL_DEFINEx(2, _##name, __VA_ARGS__)
+@@ -179,31 +179,31 @@
+ #define SYSCALL_DEFINE5(name, ...) SYSCALL_DEFINEx(5, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE6(name, ...) SYSCALL_DEFINEx(6, _##name, __VA_ARGS__)
+ 
+-#define SYSCALL_DEFINEx(x, sname, ...)				\
+-	SYSCALL_METADATA(sname, x, __VA_ARGS__)			\
+-	__SYSCALL_DEFINEx(x, sname, __VA_ARGS__)
++#define SYSCALL_DEFINEx(x, sname, ...)                          \
++        SYSCALL_METADATA(sname, x, __VA_ARGS__)                 \
++        __SYSCALL_DEFINEx(x, sname, __VA_ARGS__)
+ 
+ #define __PROTECT(...) asmlinkage_protect(__VA_ARGS__)
+-#define __SYSCALL_DEFINEx(x, name, ...)					\
+-	asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))	\
+-		__attribute__((alias(__stringify(SyS##name))));		\
+-	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));	\
+-	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
+-	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))	\
+-	{								\
+-		long ret = SYSC##name(__MAP(x,__SC_CAST,__VA_ARGS__));	\
+-		__MAP(x,__SC_TEST,__VA_ARGS__);				\
+-		__PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));	\
+-		return ret;						\
+-	}								\
+-	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__))
++#define __SYSCALL_DEFINEx(x, name, ...)                                 \
++        asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))       \
++                __attribute__((alias(__stringify(SyS##name))));         \
++        static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));  \
++        asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));      \
++        asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))       \
++        {                                                               \
++                long ret = SYSC##name(__MAP(x,__SC_CAST,__VA_ARGS__));  \
++                __MAP(x,__SC_TEST,__VA_ARGS__);                         \
++                __PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));       \
++                return ret;                                             \
++        }                                                               \
++        static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__))
+ 
+ asmlinkage long sys_time(time_t __user *tloc);
+ asmlinkage long sys_stime(time_t __user *tptr);
+ asmlinkage long sys_gettimeofday(struct timeval __user *tv,
+-				struct timezone __user *tz);
++                                struct timezone __user *tz);
+ asmlinkage long sys_settimeofday(struct timeval __user *tv,
+-				struct timezone __user *tz);
++                                struct timezone __user *tz);
+ asmlinkage long sys_adjtimex(struct timex __user *txc_p);
+ 
+ asmlinkage long sys_times(struct tms __user *tbuf);
+@@ -238,95 +238,95 @@
+ 
+ asmlinkage long sys_acct(const char __user *name);
+ asmlinkage long sys_capget(cap_user_header_t header,
+-				cap_user_data_t dataptr);
++                                cap_user_data_t dataptr);
+ asmlinkage long sys_capset(cap_user_header_t header,
+-				const cap_user_data_t data);
++                                const cap_user_data_t data);
+ asmlinkage long sys_personality(unsigned int personality);
+ 
+ asmlinkage long sys_sigpending(old_sigset_t __user *set);
+ asmlinkage long sys_sigprocmask(int how, old_sigset_t __user *set,
+-				old_sigset_t __user *oset);
++                                old_sigset_t __user *oset);
+ asmlinkage long sys_sigaltstack(const struct sigaltstack __user *uss,
+-				struct sigaltstack __user *uoss);
++                                struct sigaltstack __user *uoss);
+ 
+ asmlinkage long sys_getitimer(int which, struct itimerval __user *value);
+ asmlinkage long sys_setitimer(int which,
+-				struct itimerval __user *value,
+-				struct itimerval __user *ovalue);
++                                struct itimerval __user *value,
++                                struct itimerval __user *ovalue);
+ asmlinkage long sys_timer_create(clockid_t which_clock,
+-				 struct sigevent __user *timer_event_spec,
+-				 timer_t __user * created_timer_id);
++                                 struct sigevent __user *timer_event_spec,
++                                 timer_t __user * created_timer_id);
+ asmlinkage long sys_timer_gettime(timer_t timer_id,
+-				struct itimerspec __user *setting);
++                                struct itimerspec __user *setting);
+ asmlinkage long sys_timer_getoverrun(timer_t timer_id);
+ asmlinkage long sys_timer_settime(timer_t timer_id, int flags,
+-				const struct itimerspec __user *new_setting,
+-				struct itimerspec __user *old_setting);
++                                const struct itimerspec __user *new_setting,
++                                struct itimerspec __user *old_setting);
+ asmlinkage long sys_timer_delete(timer_t timer_id);
+ asmlinkage long sys_clock_settime(clockid_t which_clock,
+-				const struct timespec __user *tp);
++                                const struct timespec __user *tp);
+ asmlinkage long sys_clock_gettime(clockid_t which_clock,
+-				struct timespec __user *tp);
++                                struct timespec __user *tp);
+ asmlinkage long sys_clock_adjtime(clockid_t which_clock,
+-				struct timex __user *tx);
++                                struct timex __user *tx);
+ asmlinkage long sys_clock_getres(clockid_t which_clock,
+-				struct timespec __user *tp);
++                                struct timespec __user *tp);
+ asmlinkage long sys_clock_nanosleep(clockid_t which_clock, int flags,
+-				const struct timespec __user *rqtp,
+-				struct timespec __user *rmtp);
++                                const struct timespec __user *rqtp,
++                                struct timespec __user *rmtp);
+ 
+ asmlinkage long sys_nice(int increment);
+ asmlinkage long sys_sched_setscheduler(pid_t pid, int policy,
+-					struct sched_param __user *param);
++                                        struct sched_param __user *param);
+ asmlinkage long sys_sched_setparam(pid_t pid,
+-					struct sched_param __user *param);
++                                        struct sched_param __user *param);
+ asmlinkage long sys_sched_setattr(pid_t pid,
+-					struct sched_attr __user *attr,
+-					unsigned int flags);
++                                        struct sched_attr __user *attr,
++                                        unsigned int flags);
+ asmlinkage long sys_sched_getscheduler(pid_t pid);
+ asmlinkage long sys_sched_getparam(pid_t pid,
+-					struct sched_param __user *param);
++                                        struct sched_param __user *param);
+ asmlinkage long sys_sched_getattr(pid_t pid,
+-					struct sched_attr __user *attr,
+-					unsigned int size,
+-					unsigned int flags);
++                                        struct sched_attr __user *attr,
++                                        unsigned int size,
++                                        unsigned int flags);
+ asmlinkage long sys_sched_setaffinity(pid_t pid, unsigned int len,
+-					unsigned long __user *user_mask_ptr);
++                                        unsigned long __user *user_mask_ptr);
+ asmlinkage long sys_sched_getaffinity(pid_t pid, unsigned int len,
+-					unsigned long __user *user_mask_ptr);
++                                        unsigned long __user *user_mask_ptr);
+ asmlinkage long sys_sched_yield(void);
+ asmlinkage long sys_sched_get_priority_max(int policy);
+ asmlinkage long sys_sched_get_priority_min(int policy);
+ asmlinkage long sys_sched_rr_get_interval(pid_t pid,
+-					struct timespec __user *interval);
++                                        struct timespec __user *interval);
+ asmlinkage long sys_setpriority(int which, int who, int niceval);
+ asmlinkage long sys_getpriority(int which, int who);
+ 
+ asmlinkage long sys_shutdown(int, int);
+ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd,
+-				void __user *arg);
++                                void __user *arg);
+ asmlinkage long sys_restart_syscall(void);
+ asmlinkage long sys_kexec_load(unsigned long entry, unsigned long nr_segments,
+-				struct kexec_segment __user *segments,
+-				unsigned long flags);
++                                struct kexec_segment __user *segments,
++                                unsigned long flags);
+ 
+ asmlinkage long sys_exit(int error_code);
+ asmlinkage long sys_exit_group(int error_code);
+ asmlinkage long sys_wait4(pid_t pid, int __user *stat_addr,
+-				int options, struct rusage __user *ru);
++                                int options, struct rusage __user *ru);
+ asmlinkage long sys_waitid(int which, pid_t pid,
+-			   struct siginfo __user *infop,
+-			   int options, struct rusage __user *ru);
++                           struct siginfo __user *infop,
++                           int options, struct rusage __user *ru);
+ asmlinkage long sys_waitpid(pid_t pid, int __user *stat_addr, int options);
+ asmlinkage long sys_set_tid_address(int __user *tidptr);
+ asmlinkage long sys_futex(u32 __user *uaddr, int op, u32 val,
+-			struct timespec __user *utime, u32 __user *uaddr2,
+-			u32 val3);
++                        struct timespec __user *utime, u32 __user *uaddr2,
++                        u32 val3);
+ 
+ asmlinkage long sys_init_module(void __user *umod, unsigned long len,
+-				const char __user *uargs);
++                                const char __user *uargs);
+ asmlinkage long sys_delete_module(const char __user *name_user,
+-				unsigned int flags);
++                                unsigned int flags);
+ 
+ #ifdef CONFIG_OLD_SIGSUSPEND
+ asmlinkage long sys_sigsuspend(old_sigset_t mask);
+@@ -340,24 +340,24 @@
+ 
+ #ifdef CONFIG_OLD_SIGACTION
+ asmlinkage long sys_sigaction(int, const struct old_sigaction __user *,
+-				struct old_sigaction __user *);
++                                struct old_sigaction __user *);
+ #endif
+ 
+ #ifndef CONFIG_ODD_RT_SIGACTION
+ asmlinkage long sys_rt_sigaction(int,
+-				 const struct sigaction __user *,
+-				 struct sigaction __user *,
+-				 size_t);
++                                 const struct sigaction __user *,
++                                 struct sigaction __user *,
++                                 size_t);
+ #endif
+ asmlinkage long sys_rt_sigprocmask(int how, sigset_t __user *set,
+-				sigset_t __user *oset, size_t sigsetsize);
++                                sigset_t __user *oset, size_t sigsetsize);
+ asmlinkage long sys_rt_sigpending(sigset_t __user *set, size_t sigsetsize);
+ asmlinkage long sys_rt_sigtimedwait(const sigset_t __user *uthese,
+-				siginfo_t __user *uinfo,
+-				const struct timespec __user *uts,
+-				size_t sigsetsize);
++                                siginfo_t __user *uinfo,
++                                const struct timespec __user *uts,
++                                size_t sigsetsize);
+ asmlinkage long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t  pid, int sig,
+-		siginfo_t __user *uinfo);
++                siginfo_t __user *uinfo);
+ asmlinkage long sys_kill(int pid, int sig);
+ asmlinkage long sys_tgkill(int tgid, int pid, int sig);
+ asmlinkage long sys_tkill(int pid, int sig);
+@@ -372,73 +372,73 @@
+ asmlinkage long sys_fdatasync(unsigned int fd);
+ asmlinkage long sys_bdflush(int func, long data);
+ asmlinkage long sys_mount(char __user *dev_name, char __user *dir_name,
+-				char __user *type, unsigned long flags,
+-				void __user *data);
++                                char __user *type, unsigned long flags,
++                                void __user *data);
+ asmlinkage long sys_umount(char __user *name, int flags);
+ asmlinkage long sys_oldumount(char __user *name);
+ asmlinkage long sys_truncate(const char __user *path, long length);
+ asmlinkage long sys_ftruncate(unsigned int fd, unsigned long length);
+ asmlinkage long sys_stat(const char __user *filename,
+-			struct __old_kernel_stat __user *statbuf);
++                        struct __old_kernel_stat __user *statbuf);
+ asmlinkage long sys_statfs(const char __user * path,
+-				struct statfs __user *buf);
++                                struct statfs __user *buf);
+ asmlinkage long sys_statfs64(const char __user *path, size_t sz,
+-				struct statfs64 __user *buf);
++                                struct statfs64 __user *buf);
+ asmlinkage long sys_fstatfs(unsigned int fd, struct statfs __user *buf);
+ asmlinkage long sys_fstatfs64(unsigned int fd, size_t sz,
+-				struct statfs64 __user *buf);
++                                struct statfs64 __user *buf);
+ asmlinkage long sys_lstat(const char __user *filename,
+-			struct __old_kernel_stat __user *statbuf);
++                        struct __old_kernel_stat __user *statbuf);
+ asmlinkage long sys_fstat(unsigned int fd,
+-			struct __old_kernel_stat __user *statbuf);
++                        struct __old_kernel_stat __user *statbuf);
+ asmlinkage long sys_newstat(const char __user *filename,
+-				struct stat __user *statbuf);
++                                struct stat __user *statbuf);
+ asmlinkage long sys_newlstat(const char __user *filename,
+-				struct stat __user *statbuf);
++                                struct stat __user *statbuf);
+ asmlinkage long sys_newfstat(unsigned int fd, struct stat __user *statbuf);
+ asmlinkage long sys_ustat(unsigned dev, struct ustat __user *ubuf);
+ #if BITS_PER_LONG == 32
+ asmlinkage long sys_stat64(const char __user *filename,
+-				struct stat64 __user *statbuf);
++                                struct stat64 __user *statbuf);
+ asmlinkage long sys_fstat64(unsigned long fd, struct stat64 __user *statbuf);
+ asmlinkage long sys_lstat64(const char __user *filename,
+-				struct stat64 __user *statbuf);
++                                struct stat64 __user *statbuf);
+ asmlinkage long sys_truncate64(const char __user *path, loff_t length);
+ asmlinkage long sys_ftruncate64(unsigned int fd, loff_t length);
+ #endif
+ 
+ asmlinkage long sys_setxattr(const char __user *path, const char __user *name,
+-			     const void __user *value, size_t size, int flags);
++                             const void __user *value, size_t size, int flags);
+ asmlinkage long sys_lsetxattr(const char __user *path, const char __user *name,
+-			      const void __user *value, size_t size, int flags);
++                              const void __user *value, size_t size, int flags);
+ asmlinkage long sys_fsetxattr(int fd, const char __user *name,
+-			      const void __user *value, size_t size, int flags);
++                              const void __user *value, size_t size, int flags);
+ asmlinkage long sys_getxattr(const char __user *path, const char __user *name,
+-			     void __user *value, size_t size);
++                             void __user *value, size_t size);
+ asmlinkage long sys_lgetxattr(const char __user *path, const char __user *name,
+-			      void __user *value, size_t size);
++                              void __user *value, size_t size);
+ asmlinkage long sys_fgetxattr(int fd, const char __user *name,
+-			      void __user *value, size_t size);
++                              void __user *value, size_t size);
+ asmlinkage long sys_listxattr(const char __user *path, char __user *list,
+-			      size_t size);
++                              size_t size);
+ asmlinkage long sys_llistxattr(const char __user *path, char __user *list,
+-			       size_t size);
++                               size_t size);
+ asmlinkage long sys_flistxattr(int fd, char __user *list, size_t size);
+ asmlinkage long sys_removexattr(const char __user *path,
+-				const char __user *name);
++                                const char __user *name);
+ asmlinkage long sys_lremovexattr(const char __user *path,
+-				 const char __user *name);
++                                 const char __user *name);
+ asmlinkage long sys_fremovexattr(int fd, const char __user *name);
+ 
+ asmlinkage long sys_brk(unsigned long brk);
+ asmlinkage long sys_mprotect(unsigned long start, size_t len,
+-				unsigned long prot);
++                                unsigned long prot);
+ asmlinkage long sys_mremap(unsigned long addr,
+-			   unsigned long old_len, unsigned long new_len,
+-			   unsigned long flags, unsigned long new_addr);
++                           unsigned long old_len, unsigned long new_len,
++                           unsigned long flags, unsigned long new_addr);
+ asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
+-			unsigned long prot, unsigned long pgoff,
+-			unsigned long flags);
++                        unsigned long prot, unsigned long pgoff,
++                        unsigned long flags);
+ asmlinkage long sys_msync(unsigned long start, size_t len, int flags);
+ asmlinkage long sys_fadvise64(int fd, loff_t offset, size_t len, int advice);
+ asmlinkage long sys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice);
+@@ -449,26 +449,26 @@
+ asmlinkage long sys_munlockall(void);
+ asmlinkage long sys_madvise(unsigned long start, size_t len, int behavior);
+ asmlinkage long sys_mincore(unsigned long start, size_t len,
+-				unsigned char __user * vec);
++                                unsigned char __user * vec);
+ 
+ asmlinkage long sys_pivot_root(const char __user *new_root,
+-				const char __user *put_old);
++                                const char __user *put_old);
+ asmlinkage long sys_chroot(const char __user *filename);
+ asmlinkage long sys_mknod(const char __user *filename, umode_t mode,
+-				unsigned dev);
++                                unsigned dev);
+ asmlinkage long sys_link(const char __user *oldname,
+-				const char __user *newname);
++                                const char __user *newname);
+ asmlinkage long sys_symlink(const char __user *old, const char __user *new);
+ asmlinkage long sys_unlink(const char __user *pathname);
+ asmlinkage long sys_rename(const char __user *oldname,
+-				const char __user *newname);
++                                const char __user *newname);
+ asmlinkage long sys_chmod(const char __user *filename, umode_t mode);
+ asmlinkage long sys_fchmod(unsigned int fd, umode_t mode);
+ 
+ asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg);
+ #if BITS_PER_LONG == 32
+ asmlinkage long sys_fcntl64(unsigned int fd,
+-				unsigned int cmd, unsigned long arg);
++                                unsigned int cmd, unsigned long arg);
+ #endif
+ asmlinkage long sys_pipe(int __user *fildes);
+ asmlinkage long sys_pipe2(int __user *fildes, int flags);
+@@ -477,41 +477,41 @@
+ asmlinkage long sys_dup3(unsigned int oldfd, unsigned int newfd, int flags);
+ asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int on);
+ asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd,
+-				unsigned long arg);
++                                unsigned long arg);
+ asmlinkage long sys_flock(unsigned int fd, unsigned int cmd);
+ asmlinkage long sys_io_setup(unsigned nr_reqs, aio_context_t __user *ctx);
+ asmlinkage long sys_io_destroy(aio_context_t ctx);
+ asmlinkage long sys_io_getevents(aio_context_t ctx_id,
+-				long min_nr,
+-				long nr,
+-				struct io_event __user *events,
+-				struct timespec __user *timeout);
++                                long min_nr,
++                                long nr,
++                                struct io_event __user *events,
++                                struct timespec __user *timeout);
+ asmlinkage long sys_io_submit(aio_context_t, long,
+-				struct iocb __user * __user *);
++                                struct iocb __user * __user *);
+ asmlinkage long sys_io_cancel(aio_context_t ctx_id, struct iocb __user *iocb,
+-			      struct io_event __user *result);
++                              struct io_event __user *result);
+ asmlinkage long sys_sendfile(int out_fd, int in_fd,
+-			     off_t __user *offset, size_t count);
++                             off_t __user *offset, size_t count);
+ asmlinkage long sys_sendfile64(int out_fd, int in_fd,
+-			       loff_t __user *offset, size_t count);
++                               loff_t __user *offset, size_t count);
+ asmlinkage long sys_readlink(const char __user *path,
+-				char __user *buf, int bufsiz);
++                                char __user *buf, int bufsiz);
+ asmlinkage long sys_creat(const char __user *pathname, umode_t mode);
+ asmlinkage long sys_open(const char __user *filename,
+-				int flags, umode_t mode);
++                                int flags, umode_t mode);
+ asmlinkage long sys_close(unsigned int fd);
+ asmlinkage long sys_access(const char __user *filename, int mode);
+ asmlinkage long sys_vhangup(void);
+ asmlinkage long sys_chown(const char __user *filename,
+-				uid_t user, gid_t group);
++                                uid_t user, gid_t group);
+ asmlinkage long sys_lchown(const char __user *filename,
+-				uid_t user, gid_t group);
++                                uid_t user, gid_t group);
+ asmlinkage long sys_fchown(unsigned int fd, uid_t user, gid_t group);
+ #ifdef CONFIG_UID16
+ asmlinkage long sys_chown16(const char __user *filename,
+-				old_uid_t user, old_gid_t group);
++                                old_uid_t user, old_gid_t group);
+ asmlinkage long sys_lchown16(const char __user *filename,
+-				old_uid_t user, old_gid_t group);
++                                old_uid_t user, old_gid_t group);
+ asmlinkage long sys_fchown16(unsigned int fd, old_uid_t user, old_gid_t group);
+ asmlinkage long sys_setregid16(old_gid_t rgid, old_gid_t egid);
+ asmlinkage long sys_setgid16(old_gid_t gid);
+@@ -519,10 +519,10 @@
+ asmlinkage long sys_setuid16(old_uid_t uid);
+ asmlinkage long sys_setresuid16(old_uid_t ruid, old_uid_t euid, old_uid_t suid);
+ asmlinkage long sys_getresuid16(old_uid_t __user *ruid,
+-				old_uid_t __user *euid, old_uid_t __user *suid);
++                                old_uid_t __user *euid, old_uid_t __user *suid);
+ asmlinkage long sys_setresgid16(old_gid_t rgid, old_gid_t egid, old_gid_t sgid);
+ asmlinkage long sys_getresgid16(old_gid_t __user *rgid,
+-				old_gid_t __user *egid, old_gid_t __user *sgid);
++                                old_gid_t __user *egid, old_gid_t __user *sgid);
+ asmlinkage long sys_setfsuid16(old_uid_t uid);
+ asmlinkage long sys_setfsgid16(old_gid_t gid);
+ asmlinkage long sys_getgroups16(int gidsetsize, old_gid_t __user *grouplist);
+@@ -534,32 +534,32 @@
+ #endif
+ 
+ asmlinkage long sys_utime(char __user *filename,
+-				struct utimbuf __user *times);
++                                struct utimbuf __user *times);
+ asmlinkage long sys_utimes(char __user *filename,
+-				struct timeval __user *utimes);
++                                struct timeval __user *utimes);
+ asmlinkage long sys_lseek(unsigned int fd, off_t offset,
+-			  unsigned int whence);
++                          unsigned int whence);
+ asmlinkage long sys_llseek(unsigned int fd, unsigned long offset_high,
+-			unsigned long offset_low, loff_t __user *result,
+-			unsigned int whence);
++                        unsigned long offset_low, loff_t __user *result,
++                        unsigned int whence);
+ asmlinkage long sys_read(unsigned int fd, char __user *buf, size_t count);
+ asmlinkage long sys_readahead(int fd, loff_t offset, size_t count);
+ asmlinkage long sys_readv(unsigned long fd,
+-			  const struct iovec __user *vec,
+-			  unsigned long vlen);
++                          const struct iovec __user *vec,
++                          unsigned long vlen);
+ asmlinkage long sys_write(unsigned int fd, const char __user *buf,
+-			  size_t count);
++                          size_t count);
+ asmlinkage long sys_writev(unsigned long fd,
+-			   const struct iovec __user *vec,
+-			   unsigned long vlen);
++                           const struct iovec __user *vec,
++                           unsigned long vlen);
+ asmlinkage long sys_pread64(unsigned int fd, char __user *buf,
+-			    size_t count, loff_t pos);
++                            size_t count, loff_t pos);
+ asmlinkage long sys_pwrite64(unsigned int fd, const char __user *buf,
+-			     size_t count, loff_t pos);
++                             size_t count, loff_t pos);
+ asmlinkage long sys_preadv(unsigned long fd, const struct iovec __user *vec,
+-			   unsigned long vlen, unsigned long pos_l, unsigned long pos_h);
++                           unsigned long vlen, unsigned long pos_l, unsigned long pos_h);
+ asmlinkage long sys_pwritev(unsigned long fd, const struct iovec __user *vec,
+-			    unsigned long vlen, unsigned long pos_l, unsigned long pos_h);
++                            unsigned long vlen, unsigned long pos_l, unsigned long pos_h);
+ asmlinkage long sys_getcwd(char __user *buf, unsigned long size);
+ asmlinkage long sys_mkdir(const char __user *pathname, umode_t mode);
+ asmlinkage long sys_chdir(const char __user *filename);
+@@ -567,18 +567,18 @@
+ asmlinkage long sys_rmdir(const char __user *pathname);
+ asmlinkage long sys_lookup_dcookie(u64 cookie64, char __user *buf, size_t len);
+ asmlinkage long sys_quotactl(unsigned int cmd, const char __user *special,
+-				qid_t id, void __user *addr);
++                                qid_t id, void __user *addr);
+ asmlinkage long sys_getdents(unsigned int fd,
+-				struct linux_dirent __user *dirent,
+-				unsigned int count);
++                                struct linux_dirent __user *dirent,
++                                unsigned int count);
+ asmlinkage long sys_getdents64(unsigned int fd,
+-				struct linux_dirent64 __user *dirent,
+-				unsigned int count);
++                                struct linux_dirent64 __user *dirent,
++                                unsigned int count);
+ 
+ asmlinkage long sys_setsockopt(int fd, int level, int optname,
+-				char __user *optval, int optlen);
++                                char __user *optval, int optlen);
+ asmlinkage long sys_getsockopt(int fd, int level, int optname,
+-				char __user *optval, int __user *optlen);
++                                char __user *optval, int __user *optlen);
+ asmlinkage long sys_bind(int, struct sockaddr __user *, int);
+ asmlinkage long sys_connect(int, struct sockaddr __user *, int);
+ asmlinkage long sys_accept(int, struct sockaddr __user *, int __user *);
+@@ -587,36 +587,36 @@
+ asmlinkage long sys_getpeername(int, struct sockaddr __user *, int __user *);
+ asmlinkage long sys_send(int, void __user *, size_t, unsigned);
+ asmlinkage long sys_sendto(int, void __user *, size_t, unsigned,
+-				struct sockaddr __user *, int);
++                                struct sockaddr __user *, int);
+ asmlinkage long sys_sendmsg(int fd, struct msghdr __user *msg, unsigned flags);
+ asmlinkage long sys_sendmmsg(int fd, struct mmsghdr __user *msg,
+-			     unsigned int vlen, unsigned flags);
++                             unsigned int vlen, unsigned flags);
+ asmlinkage long sys_recv(int, void __user *, size_t, unsigned);
+ asmlinkage long sys_recvfrom(int, void __user *, size_t, unsigned,
+-				struct sockaddr __user *, int __user *);
++                                struct sockaddr __user *, int __user *);
+ asmlinkage long sys_recvmsg(int fd, struct msghdr __user *msg, unsigned flags);
+ asmlinkage long sys_recvmmsg(int fd, struct mmsghdr __user *msg,
+-			     unsigned int vlen, unsigned flags,
+-			     struct timespec __user *timeout);
++                             unsigned int vlen, unsigned flags,
++                             struct timespec __user *timeout);
+ asmlinkage long sys_socket(int, int, int);
+ asmlinkage long sys_socketpair(int, int, int, int __user *);
+ asmlinkage long sys_socketcall(int call, unsigned long __user *args);
+ asmlinkage long sys_listen(int, int);
+ asmlinkage long sys_poll(struct pollfd __user *ufds, unsigned int nfds,
+-				int timeout);
++                                int timeout);
+ asmlinkage long sys_select(int n, fd_set __user *inp, fd_set __user *outp,
+-			fd_set __user *exp, struct timeval __user *tvp);
++                        fd_set __user *exp, struct timeval __user *tvp);
+ asmlinkage long sys_old_select(struct sel_arg_struct __user *arg);
+ asmlinkage long sys_epoll_create(int size);
+ asmlinkage long sys_epoll_create1(int flags);
+ asmlinkage long sys_epoll_ctl(int epfd, int op, int fd,
+-				struct epoll_event __user *event);
++                                struct epoll_event __user *event);
+ asmlinkage long sys_epoll_wait(int epfd, struct epoll_event __user *events,
+-				int maxevents, int timeout);
++                                int maxevents, int timeout);
+ asmlinkage long sys_epoll_pwait(int epfd, struct epoll_event __user *events,
+-				int maxevents, int timeout,
+-				const sigset_t __user *sigmask,
+-				size_t sigsetsize);
++                                int maxevents, int timeout,
++                                const sigset_t __user *sigmask,
++                                size_t sigsetsize);
+ asmlinkage long sys_gethostname(char __user *name, int len);
+ asmlinkage long sys_sethostname(char __user *name, int len);
+ asmlinkage long sys_setdomainname(char __user *name, int len);
+@@ -625,38 +625,38 @@
+ asmlinkage long sys_olduname(struct oldold_utsname __user *);
+ 
+ asmlinkage long sys_getrlimit(unsigned int resource,
+-				struct rlimit __user *rlim);
++                                struct rlimit __user *rlim);
+ #if defined(COMPAT_RLIM_OLD_INFINITY) || !(defined(CONFIG_IA64))
+ asmlinkage long sys_old_getrlimit(unsigned int resource, struct rlimit __user *rlim);
+ #endif
+ asmlinkage long sys_setrlimit(unsigned int resource,
+-				struct rlimit __user *rlim);
++                                struct rlimit __user *rlim);
+ asmlinkage long sys_prlimit64(pid_t pid, unsigned int resource,
+-				const struct rlimit64 __user *new_rlim,
+-				struct rlimit64 __user *old_rlim);
++                                const struct rlimit64 __user *new_rlim,
++                                struct rlimit64 __user *old_rlim);
+ asmlinkage long sys_getrusage(int who, struct rusage __user *ru);
+ asmlinkage long sys_umask(int mask);
+ 
+ asmlinkage long sys_msgget(key_t key, int msgflg);
+ asmlinkage long sys_msgsnd(int msqid, struct msgbuf __user *msgp,
+-				size_t msgsz, int msgflg);
++                                size_t msgsz, int msgflg);
+ asmlinkage long sys_msgrcv(int msqid, struct msgbuf __user *msgp,
+-				size_t msgsz, long msgtyp, int msgflg);
++                                size_t msgsz, long msgtyp, int msgflg);
+ asmlinkage long sys_msgctl(int msqid, int cmd, struct msqid_ds __user *buf);
+ 
+ asmlinkage long sys_semget(key_t key, int nsems, int semflg);
+ asmlinkage long sys_semop(int semid, struct sembuf __user *sops,
+-				unsigned nsops);
++                                unsigned nsops);
+ asmlinkage long sys_semctl(int semid, int semnum, int cmd, unsigned long arg);
+ asmlinkage long sys_semtimedop(int semid, struct sembuf __user *sops,
+-				unsigned nsops,
+-				const struct timespec __user *timeout);
++                                unsigned nsops,
++                                const struct timespec __user *timeout);
+ asmlinkage long sys_shmat(int shmid, char __user *shmaddr, int shmflg);
+ asmlinkage long sys_shmget(key_t key, size_t size, int flag);
+ asmlinkage long sys_shmdt(char __user *shmaddr);
+ asmlinkage long sys_shmctl(int shmid, int cmd, struct shmid_ds __user *buf);
+ asmlinkage long sys_ipc(unsigned int call, int first, unsigned long second,
+-		unsigned long third, void __user *ptr, long fifth);
++                unsigned long third, void __user *ptr, long fifth);
+ 
+ asmlinkage long sys_mq_open(const char __user *name, int oflag, umode_t mode, struct mq_attr __user *attr);
+ asmlinkage long sys_mq_unlink(const char __user *name);
+@@ -667,192 +667,197 @@
+ 
+ asmlinkage long sys_pciconfig_iobase(long which, unsigned long bus, unsigned long devfn);
+ asmlinkage long sys_pciconfig_read(unsigned long bus, unsigned long dfn,
+-				unsigned long off, unsigned long len,
+-				void __user *buf);
++                                unsigned long off, unsigned long len,
++                                void __user *buf);
+ asmlinkage long sys_pciconfig_write(unsigned long bus, unsigned long dfn,
+-				unsigned long off, unsigned long len,
+-				void __user *buf);
++                                unsigned long off, unsigned long len,
++                                void __user *buf);
+ 
+ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
+-			unsigned long arg4, unsigned long arg5);
++                        unsigned long arg4, unsigned long arg5);
+ asmlinkage long sys_swapon(const char __user *specialfile, int swap_flags);
+ asmlinkage long sys_swapoff(const char __user *specialfile);
+ asmlinkage long sys_sysctl(struct __sysctl_args __user *args);
+ asmlinkage long sys_sysinfo(struct sysinfo __user *info);
+ asmlinkage long sys_sysfs(int option,
+-				unsigned long arg1, unsigned long arg2);
++                                unsigned long arg1, unsigned long arg2);
+ asmlinkage long sys_syslog(int type, char __user *buf, int len);
+ asmlinkage long sys_uselib(const char __user *library);
+ asmlinkage long sys_ni_syscall(void);
+ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr,
+-			   unsigned long data);
++                           unsigned long data);
+ 
+ asmlinkage long sys_add_key(const char __user *_type,
+-			    const char __user *_description,
+-			    const void __user *_payload,
+-			    size_t plen,
+-			    key_serial_t destringid);
++                            const char __user *_description,
++                            const void __user *_payload,
++                            size_t plen,
++                            key_serial_t destringid);
+ 
+ asmlinkage long sys_request_key(const char __user *_type,
+-				const char __user *_description,
+-				const char __user *_callout_info,
+-				key_serial_t destringid);
++                                const char __user *_description,
++                                const char __user *_callout_info,
++                                key_serial_t destringid);
+ 
+ asmlinkage long sys_keyctl(int cmd, unsigned long arg2, unsigned long arg3,
+-			   unsigned long arg4, unsigned long arg5);
++                           unsigned long arg4, unsigned long arg5);
+ 
+ asmlinkage long sys_ioprio_set(int which, int who, int ioprio);
+ asmlinkage long sys_ioprio_get(int which, int who);
+ asmlinkage long sys_set_mempolicy(int mode, unsigned long __user *nmask,
+-				unsigned long maxnode);
++                                unsigned long maxnode);
+ asmlinkage long sys_migrate_pages(pid_t pid, unsigned long maxnode,
+-				const unsigned long __user *from,
+-				const unsigned long __user *to);
++                                const unsigned long __user *from,
++                                const unsigned long __user *to);
+ asmlinkage long sys_move_pages(pid_t pid, unsigned long nr_pages,
+-				const void __user * __user *pages,
+-				const int __user *nodes,
+-				int __user *status,
+-				int flags);
++                                const void __user * __user *pages,
++                                const int __user *nodes,
++                                int __user *status,
++                                int flags);
+ asmlinkage long sys_mbind(unsigned long start, unsigned long len,
+-				unsigned long mode,
+-				unsigned long __user *nmask,
+-				unsigned long maxnode,
+-				unsigned flags);
++                                unsigned long mode,
++                                unsigned long __user *nmask,
++                                unsigned long maxnode,
++                                unsigned flags);
+ asmlinkage long sys_get_mempolicy(int __user *policy,
+-				unsigned long __user *nmask,
+-				unsigned long maxnode,
+-				unsigned long addr, unsigned long flags);
++                                unsigned long __user *nmask,
++                                unsigned long maxnode,
++                                unsigned long addr, unsigned long flags);
+ 
+ asmlinkage long sys_inotify_init(void);
+ asmlinkage long sys_inotify_init1(int flags);
+ asmlinkage long sys_inotify_add_watch(int fd, const char __user *path,
+-					u32 mask);
++                                        u32 mask);
+ asmlinkage long sys_inotify_rm_watch(int fd, __s32 wd);
+ 
+ asmlinkage long sys_spu_run(int fd, __u32 __user *unpc,
+-				 __u32 __user *ustatus);
++                                 __u32 __user *ustatus);
+ asmlinkage long sys_spu_create(const char __user *name,
+-		unsigned int flags, umode_t mode, int fd);
++                unsigned int flags, umode_t mode, int fd);
+ 
+ asmlinkage long sys_mknodat(int dfd, const char __user * filename, umode_t mode,
+-			    unsigned dev);
++                            unsigned dev);
+ asmlinkage long sys_mkdirat(int dfd, const char __user * pathname, umode_t mode);
+ asmlinkage long sys_unlinkat(int dfd, const char __user * pathname, int flag);
+ asmlinkage long sys_symlinkat(const char __user * oldname,
+-			      int newdfd, const char __user * newname);
++                              int newdfd, const char __user * newname);
+ asmlinkage long sys_linkat(int olddfd, const char __user *oldname,
+-			   int newdfd, const char __user *newname, int flags);
++                           int newdfd, const char __user *newname, int flags);
+ asmlinkage long sys_renameat(int olddfd, const char __user * oldname,
+-			     int newdfd, const char __user * newname);
++                             int newdfd, const char __user * newname);
+ asmlinkage long sys_futimesat(int dfd, const char __user *filename,
+-			      struct timeval __user *utimes);
++                              struct timeval __user *utimes);
+ asmlinkage long sys_faccessat(int dfd, const char __user *filename, int mode);
+ asmlinkage long sys_fchmodat(int dfd, const char __user * filename,
+-			     umode_t mode);
++                             umode_t mode);
+ asmlinkage long sys_fchownat(int dfd, const char __user *filename, uid_t user,
+-			     gid_t group, int flag);
++                             gid_t group, int flag);
+ asmlinkage long sys_openat(int dfd, const char __user *filename, int flags,
+-			   umode_t mode);
++                           umode_t mode);
+ asmlinkage long sys_newfstatat(int dfd, const char __user *filename,
+-			       struct stat __user *statbuf, int flag);
++                               struct stat __user *statbuf, int flag);
+ asmlinkage long sys_fstatat64(int dfd, const char __user *filename,
+-			       struct stat64 __user *statbuf, int flag);
++                               struct stat64 __user *statbuf, int flag);
+ asmlinkage long sys_readlinkat(int dfd, const char __user *path, char __user *buf,
+-			       int bufsiz);
++                               int bufsiz);
+ asmlinkage long sys_utimensat(int dfd, const char __user *filename,
+-				struct timespec __user *utimes, int flags);
++                                struct timespec __user *utimes, int flags);
+ asmlinkage long sys_unshare(unsigned long unshare_flags);
+ 
+ asmlinkage long sys_splice(int fd_in, loff_t __user *off_in,
+-			   int fd_out, loff_t __user *off_out,
+-			   size_t len, unsigned int flags);
++                           int fd_out, loff_t __user *off_out,
++                           size_t len, unsigned int flags);
+ 
+ asmlinkage long sys_vmsplice(int fd, const struct iovec __user *iov,
+-			     unsigned long nr_segs, unsigned int flags);
++                             unsigned long nr_segs, unsigned int flags);
+ 
+ asmlinkage long sys_tee(int fdin, int fdout, size_t len, unsigned int flags);
+ 
+ asmlinkage long sys_sync_file_range(int fd, loff_t offset, loff_t nbytes,
+-					unsigned int flags);
++                                        unsigned int flags);
+ asmlinkage long sys_sync_file_range2(int fd, unsigned int flags,
+-				     loff_t offset, loff_t nbytes);
++                                     loff_t offset, loff_t nbytes);
+ asmlinkage long sys_get_robust_list(int pid,
+-				    struct robust_list_head __user * __user *head_ptr,
+-				    size_t __user *len_ptr);
++                                    struct robust_list_head __user * __user *head_ptr,
++                                    size_t __user *len_ptr);
+ asmlinkage long sys_set_robust_list(struct robust_list_head __user *head,
+-				    size_t len);
++                                    size_t len);
+ asmlinkage long sys_getcpu(unsigned __user *cpu, unsigned __user *node, struct getcpu_cache __user *cache);
+ asmlinkage long sys_signalfd(int ufd, sigset_t __user *user_mask, size_t sizemask);
+ asmlinkage long sys_signalfd4(int ufd, sigset_t __user *user_mask, size_t sizemask, int flags);
+ asmlinkage long sys_timerfd_create(int clockid, int flags);
+ asmlinkage long sys_timerfd_settime(int ufd, int flags,
+-				    const struct itimerspec __user *utmr,
+-				    struct itimerspec __user *otmr);
++                                    const struct itimerspec __user *utmr,
++                                    struct itimerspec __user *otmr);
+ asmlinkage long sys_timerfd_gettime(int ufd, struct itimerspec __user *otmr);
+ asmlinkage long sys_eventfd(unsigned int count);
+ asmlinkage long sys_eventfd2(unsigned int count, int flags);
+ asmlinkage long sys_fallocate(int fd, int mode, loff_t offset, loff_t len);
+ asmlinkage long sys_old_readdir(unsigned int, struct old_linux_dirent __user *, unsigned int);
+ asmlinkage long sys_pselect6(int, fd_set __user *, fd_set __user *,
+-			     fd_set __user *, struct timespec __user *,
+-			     void __user *);
++                             fd_set __user *, struct timespec __user *,
++                             void __user *);
+ asmlinkage long sys_ppoll(struct pollfd __user *, unsigned int,
+-			  struct timespec __user *, const sigset_t __user *,
+-			  size_t);
++                          struct timespec __user *, const sigset_t __user *,
++                          size_t);
+ asmlinkage long sys_fanotify_init(unsigned int flags, unsigned int event_f_flags);
+ asmlinkage long sys_fanotify_mark(int fanotify_fd, unsigned int flags,
+-				  u64 mask, int fd,
+-				  const char  __user *pathname);
++                                  u64 mask, int fd,
++                                  const char  __user *pathname);
+ asmlinkage long sys_syncfs(int fd);
+ 
+ asmlinkage long sys_fork(void);
+ asmlinkage long sys_vfork(void);
+ #ifdef CONFIG_CLONE_BACKWARDS
+ asmlinkage long sys_clone(unsigned long, unsigned long, int __user *, int,
+-	       int __user *);
++               int __user *);
+ #else
+ #ifdef CONFIG_CLONE_BACKWARDS3
+ asmlinkage long sys_clone(unsigned long, unsigned long, int, int __user *,
+-			  int __user *, int);
++                          int __user *, int);
+ #else
+ asmlinkage long sys_clone(unsigned long, unsigned long, int __user *,
+-	       int __user *, int);
++               int __user *, int);
+ #endif
+ #endif
+ 
+ asmlinkage long sys_execve(const char __user *filename,
+-		const char __user *const __user *argv,
+-		const char __user *const __user *envp);
++                const char __user *const __user *argv,
++                const char __user *const __user *envp);
+ 
+ asmlinkage long sys_perf_event_open(
+-		struct perf_event_attr __user *attr_uptr,
+-		pid_t pid, int cpu, int group_fd, unsigned long flags);
++                struct perf_event_attr __user *attr_uptr,
++                pid_t pid, int cpu, int group_fd, unsigned long flags);
+ 
+ asmlinkage long sys_mmap_pgoff(unsigned long addr, unsigned long len,
+-			unsigned long prot, unsigned long flags,
+-			unsigned long fd, unsigned long pgoff);
++                        unsigned long prot, unsigned long flags,
++                        unsigned long fd, unsigned long pgoff);
+ asmlinkage long sys_old_mmap(struct mmap_arg_struct __user *arg);
+ asmlinkage long sys_name_to_handle_at(int dfd, const char __user *name,
+-				      struct file_handle __user *handle,
+-				      int __user *mnt_id, int flag);
++                                      struct file_handle __user *handle,
++                                      int __user *mnt_id, int flag);
+ asmlinkage long sys_open_by_handle_at(int mountdirfd,
+-				      struct file_handle __user *handle,
+-				      int flags);
++                                      struct file_handle __user *handle,
++                                      int flags);
+ asmlinkage long sys_setns(int fd, int nstype);
+ asmlinkage long sys_process_vm_readv(pid_t pid,
+-				     const struct iovec __user *lvec,
+-				     unsigned long liovcnt,
+-				     const struct iovec __user *rvec,
+-				     unsigned long riovcnt,
+-				     unsigned long flags);
++                                     const struct iovec __user *lvec,
++                                     unsigned long liovcnt,
++                                     const struct iovec __user *rvec,
++                                     unsigned long riovcnt,
++                                     unsigned long flags);
+ asmlinkage long sys_process_vm_writev(pid_t pid,
+-				      const struct iovec __user *lvec,
+-				      unsigned long liovcnt,
+-				      const struct iovec __user *rvec,
+-				      unsigned long riovcnt,
+-				      unsigned long flags);
++                                      const struct iovec __user *lvec,
++                                      unsigned long liovcnt,
++                                      const struct iovec __user *rvec,
++                                      unsigned long riovcnt,
++                                      unsigned long flags);
+ 
+ asmlinkage long sys_kcmp(pid_t pid1, pid_t pid2, int type,
+-			 unsigned long idx1, unsigned long idx2);
++                         unsigned long idx1, unsigned long idx2);
+ asmlinkage long sys_finit_module(int fd, const char __user *uargs, int flags);
++
++
++asmlinkage long sys_total_memory(void);
++asmlinkage long sys_free_memory(void);
++asmlinkage long sys_slob_largest_free_block_size(void);
+ #endif
