@@ -1,1 +1,5 @@
-Altered the operating system memory allocation from first-fit, to writing a best-fit algorithm in the slob.c system file so that we change how the operating system allocates and retrieve memory.
+# Summary
+Altered the operating system memory allocation algorithm from first-fit, which the Linux current defauly, to best-fit. 
+
+## Warning
+The program permanently change the Operating System memory allocation algorithms and memory handling, allocation, and memory retrieval.
