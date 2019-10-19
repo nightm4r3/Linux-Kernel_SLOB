@@ -7,9 +7,9 @@ The algorithms .c files can be found in ```/sys/kernel/mm/``` directory.
 Best-fit memory allocation algorithms was more effecient in using memory 4k, as oppose to first-fit which leaves more memory space empty in the 4k pages. However, best-fit algorithm was significantly slower. This explains why best-fit memory allocation algorithm is advised when memory is a scarce resource. 
 
 ## Background 
-(background on the subject: what is memory allocation, what is the algorihtms? what are the other variables in the algoirhtms?)
+The SLOB (Simple list of blocks) allocator is one of three available memory allocators in the Linux kernel. (The other two are SLAB and SLUB.)<br/> 
 
-The SLOB (Simple list of blocks) allocator is one of three available memory allocators in the Linux kernel. (The other two are SLAB and SLUB.) The SLOB allocator is designed to require little memory for the implementation and housekeeping, for use in small systems such as embedded systems. Unfortunately, a major limitation of the SLOB allocator is that it suffers greatly from internal fragmentation.
+The SLOB allocator is designed to require little memory for the implementation and housekeeping, for use in small systems such as embedded systems. Unfortunately, a major limitation of the SLOB allocator is that it suffers greatly from internal fragmentation.
 
 SLOB currently uses a first-fit algorithm, which uses the first available space for memory. In 2008, a reply from Linus Torvalds on a Linux mailing list[1] was made where he suggested the use of a best-fit algorithm, which tries to find a memory block which suits needs best. Best fit finds the smallest space which fits the required amount available, avoiding loss of performance, both by fragmentation and consolidation of memory.
 
