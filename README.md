@@ -10,13 +10,14 @@ The SLOB (Simple list of blocks) allocator is one of three available memory allo
 
 The SLOB allocator is designed to require little memory for the implementation and housekeeping, for use in small systems such as embedded systems. Unfortunately, a major limitation of the SLOB allocator is that it suffers greatly from internal fragmentation.
 
-SLOB currently uses a first-fit algorithm, which uses the first available space for memory. In 2008, a reply from Linus Torvalds on a Linux mailing list[1] was made where he suggested the use of a best-fit algorithm, which tries to find a memory block which suits needs best. Best fit finds the smallest space which fits the required amount available, avoiding loss of performance, both by fragmentation and consolidation of memory.
+SLOB uses a first-fit algorithm, which uses the first available space for memory. 
+
 
 ## Algorithms 
 ### First-Fit
-First fit: There may be many holes in the memory, so the operating system, to reduce the amount of time it spends analyzing the available spaces, begins at the start of primary memory and allocates memory from the first hole it encounters large enough to satisfy the request. Using the same example as above, first fit will allocate 12KB of the 14KB block to the process.
+First fit: There may be many holes in the memory, so the operating system, to reduce the amount of time it spends analyzing the available spaces, begins at the start of primary memory and allocates memory from the first hole it encounters large enough to satisfy the request. 
 ### Best-Fit 
-Best fit: The allocator places a process in the smallest block of unallocated memory in which it will fit. For example, suppose a process requests 12KB of memory and the memory manager currently has a list of unallocated blocks of 6KB, 14KB, 19KB, 11KB, and 13KB blocks. The best-fit strategy will allocate 12KB of the 13KB block to the process.
+Best fit: The allocator places a process in the smallest block of unallocated memory in which it will fit, avoiding loss of ragmentation and consolidation of memory.
 
 
 # INSTRUCTIONS
