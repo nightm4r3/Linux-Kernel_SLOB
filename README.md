@@ -61,7 +61,7 @@ open another terminal<br/>
 1.Insure that it is running with gdb<br/>
 ```(gdb) target remote :5725```
 
-## Patch the kernel
+## Patch the kernel:
 1.Compile and replace the slob.c found in ```/sys/kernel/mm/``` with either ```slob_bestfit.c``` or ```slob_firstfit.c```.
 
 1.Replace the kernel's ```syscall_32.tbl``` and ```syscalls.h``` with the ones supplied in this repository, since it references the memory allocation function calls from the ```slob.c``` file for the kernel to use them.
