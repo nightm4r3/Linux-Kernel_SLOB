@@ -19,7 +19,7 @@ Best fit: The allocator places a process in the smallest block of unallocated me
 Best-fit memory allocation algorithms was more effecient in using memory 4k, as oppose to first-fit which leaves more memory space empty in the 4k pages. However, best-fit algorithm was significantly slower. This explains why best-fit memory allocation algorithm is advised when memory is a scarce resource. 
 
 # INSTRUCTIONS
-## Prepare a virtual kernel environment: 
+## Create a virtual kernel environment: 
 1.For this experiment, I used qemu based [yocto](https://www.yoctoproject.org/) environment:<br/>
 ```git clone "git://git.yoctoproject.org/linux-yocto-3.14"```
 ```cd linux-yocto-3.14```
