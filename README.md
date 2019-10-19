@@ -21,45 +21,45 @@ Best fit: The allocator places a process in the smallest block of unallocated me
 
 # INSTRUCTIONS
 ## Prepare a virtual kernel environment: 
-1.For this experiment, I used qemu based [yocto](https://www.yoctoproject.org/) environment:
+1.For this experiment, I used qemu based [yocto](https://www.yoctoproject.org/) environment:<br/>
 ```git clone "git://git.yoctoproject.org/linux-yocto-3.14"```
 ```cd linux-yocto-3.14```
 ```git checkout v3.14.26```
 
-1.Source the environment and compile:
+1.Source the environment and compile:<br/>
 ```source /scratch/opt/environment-setup-i586-poky-linux```
 
-1. Copy and make the menuconfig
+1. Copy and make the menuconfig<br/>
 ```cp /scratch/spring2017/files/config-3.14.26-yocto-qemu ./.config```
 ```make menuconfig```
 
 1.Setting the menuconfig
-go to the "General setup"</br>
-press / and type LOCALVERSION</br>
-Rename the Kernel Configuration to <insert-name-here>
+go to the "General setup"<br/>
+press / and type LOCALVERSION<br/>
+Rename the Kernel Configuration to <insert-name-here><br/>
 Save and Exit
 
-1. Make the kernel
-Using 16 threads: ```make -j16 all``` 
+1. Make the kernel<br/>
+Using 16 threads: ```make -j16 all``` <br/>
 If you don't want to exhaust your memory, you can use: ```make -j$(noproc) all``` 
 
-1. Run gdb
-open another terminal
-```source /scratch/opt/environment-setup-i586-poky-linux```
-```gdb ./vmlinux```
-```(gdb) target remote tcp:127.0.0.1:5725```
+1. Run gdb<br/>
+open another terminal<br/>
+```source /scratch/opt/environment-setup-i586-poky-linux```<br/>
+```gdb ./vmlinux```<br/>
+```(gdb) target remote tcp:127.0.0.1:5725```<br/>
 
-1.Login to the VM:
-```qemux86 login: root```
-```root@qemux86: uname -a```
-```root@qemux86: reboot```
+1.Login to the VM:<br/>
+```qemux86 login: root```<br/>
+```root@qemux86: uname -a```<br/>
+```root@qemux86: reboot```<br/>
 
 1. Run ```make menuconfig```
 
-1. Build the kernel with qemu:
+1. Build the kernel with qemu:<br/>
 ```qemu-system-i386 -gdb tcp::5725 -S -nographic -kernel linux-yocto-3.14/arch/x86/boot/bzImage -drive file=core-image-lsb-sdk-qemux86.ext3,if=virtio -enable-kvm -net none -usb -localtime --no-reboot --append "root=/dev/vda rw console=ttyS0 debug```
 
-1. Insure that it is running with gdb
+1. Insure that it is running with gdb<br/>
 ```(gdb) target remote :5725```
 
 ## Patch the kernel
