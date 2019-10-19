@@ -1,5 +1,9 @@
 # Description
-Altering Linux kernel memory allocation algorithm from first-fit to best-fit.
+Kernel Development
+Changing Linux kernel memory allocation algorithms from first-fit to best-fit.
+
+## Conclusion:
+Best-fit memory allocation algorithms was more effecient in using memory 4k, as oppose to first-fit which leaves more memory space empty in the 4k pages. However, best-fit algorithm was significantly slower. This explains why best-fit memory allocation algorithm is advised when memory is a scarce resource. 
 
 ## Background 
 (background on the subject: what is memory allocation, what is the algorihtms? what are the other variables in the algoirhtms?)
