@@ -1,8 +1,10 @@
 # Description
 Altering Linux kernel memory allocation algorithm from first-fit to best-fit.
 
-## Algorithms 
+## Background 
 (background on the subject: what is memory allocation, what is the algorihtms? what are the other variables in the algoirhtms?)
+
+## Algorithms 
 ### First-Fit
 The default linux kernel (since kernel date?) configurations for memory pages allocation is First-Fist.
 ### Best-Fit 
