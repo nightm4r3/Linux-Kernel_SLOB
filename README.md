@@ -23,20 +23,6 @@ Best fit: The allocator places a process in the smallest block of unallocated me
 /sys/kernel/mm/
 make menuconfig
 
-# INSTRUCTIONS
-1. (Make file?)
-1. compile slob_bestfit
-```
-gcc slob_bestfit.c
-```
-1.Patch they system using $ (?)
-Build the kernel, using eithere fakeroot(link) or yocto kernel
-
-1. Run simple test to verify that its working?
-
-
-
-
 ------------
 
 
