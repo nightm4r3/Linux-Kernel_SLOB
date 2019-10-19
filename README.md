@@ -10,6 +10,8 @@ The default linux kernel (since kernel date?) configurations for memory pages al
 ### Best-Fit 
 (Explain best-fit algorithm)
 
+/sys/kernel/mm/
+make menuconfig
 
 # INSTRUCTIONS
 1. (Make file?)
@@ -18,13 +20,12 @@ The default linux kernel (since kernel date?) configurations for memory pages al
 gcc slob_bestfit.c
 ```
 1.Patch they system using $ (?)
+Build the kernel, using eithere fakeroot(link) or yocto kernel
 
 1. Run simple test to verify that its working?
 
 
 
-## Warning
-The program permanently change the Operating System memory allocation algorithms and memory handling, allocation, and memory retrieval. Thus, it is advised to test the program on a virtual machine first.
 
 ------------
 
