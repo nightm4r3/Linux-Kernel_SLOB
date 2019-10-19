@@ -1,14 +1,27 @@
 # Description
 Altering Linux kernel memory allocation algorithm from first-fit to best-fit.
 
-(Explain best-fit and first-fit algorithm)
+## Algorithms 
+(background on the subject: what is memory allocation, what is the algorihtms? what are the other variables in the algoirhtms?)
+### First-Fit
+The default linux kernel (since kernel date?) configurations for memory pages allocation is First-Fist.
+### Best-Fit 
+(Explain best-fit algorithm)
 
-# How to use
+
+# INSTRUCTIONS
+1. (Make file?)
 1. compile slob_bestfit
 ```
 gcc slob_bestfit.c
 ```
-slob_bestfit.c changes system's memory handling algorithms to best-fit.
+1.Patch they system using $ (?)
+
+1. Run simple test to verify that its working?
+
+
+------------
+
 
 syscall_32.tbl is replaced with the kernel's "syscall_32.tbl", since it references the commands in the c files to be called correctly.  
 
