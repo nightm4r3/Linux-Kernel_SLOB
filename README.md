@@ -23,7 +23,7 @@ gcc slob_bestfit.c
 
 
 
-# Warning
+## Warning
 The program permanently change the Operating System memory allocation algorithms and memory handling, allocation, and memory retrieval. Thus, it is advised to test the program on a virtual machine first.
 
 ------------
