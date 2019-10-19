@@ -27,10 +27,10 @@ Best fit: The allocator places a process in the smallest block of unallocated me
 ```cd linux-yocto-3.14```
 ```git checkout v3.14.26```
 
-1.Source the environment and compile:<br/>
+1.Source the environment and compile<br/>
 ```source /scratch/opt/environment-setup-i586-poky-linux```
 
-1. Copy and make the menuconfig<br/>
+1.Copy and make the menuconfig <br/>
 ```cp /scratch/spring2017/files/config-3.14.26-yocto-qemu ./.config```
 ```make menuconfig```
 
@@ -40,34 +40,34 @@ press / and type LOCALVERSION<br/>
 Rename the Kernel Configuration to <insert-name-here><br/>
 Save and Exit
 
-1. Make the kernel<br/>
+1.Make the kernel<br/>
 Using 16 threads: ```make -j16 all``` <br/>
 If you don't want to exhaust your memory, you can use: ```make -j$(noproc) all``` 
 
-1. Run gdb<br/>
+1.Run gdb<br/>
 open another terminal<br/>
 ```source /scratch/opt/environment-setup-i586-poky-linux```<br/>
 ```gdb ./vmlinux```<br/>
 ```(gdb) target remote tcp:127.0.0.1:5725```<br/>
 
-1.Login to the VM:<br/>
+1.Login to the VM<br/>
 ```qemux86 login: root```<br/>
 ```root@qemux86: uname -a```<br/>
 ```root@qemux86: reboot```<br/>
 
-1. Run ```make menuconfig```
+1.Run ```make menuconfig```
 
-1. Build the kernel with qemu:<br/>
+1.Build the kernel with qemu<br/>
 ```qemu-system-i386 -gdb tcp::5725 -S -nographic -kernel linux-yocto-3.14/arch/x86/boot/bzImage -drive file=core-image-lsb-sdk-qemux86.ext3,if=virtio -enable-kvm -net none -usb -localtime --no-reboot --append "root=/dev/vda rw console=ttyS0 debug```
 
-1. Insure that it is running with gdb<br/>
+1.Insure that it is running with gdb<br/>
 ```(gdb) target remote :5725```
 
 ## Patch the kernel
-1. Compile and replace the slob.c found in ```/sys/kernel/mm/``` with either ```slob_bestfit.c``` or ```slob_firstfit.c```.
+1.Compile and replace the slob.c found in ```/sys/kernel/mm/``` with either ```slob_bestfit.c``` or ```slob_firstfit.c```.
 
-1. Replace the kernel's ```syscall_32.tbl``` and ```syscalls.h``` with the ones supplied in this repository, since it references the memory allocation function calls from the ```slob.c``` file for the kernel to use them.
+1.Replace the kernel's ```syscall_32.tbl``` and ```syscalls.h``` with the ones supplied in this repository, since it references the memory allocation function calls from the ```slob.c``` file for the kernel to use them.
 
-1. patch the system, using either [fakeroot](https://wiki.debian.org/FakeRoot) or [yocto](https://www.yoctoproject.org/)
+1.Patch the system, using either [fakeroot](https://wiki.debian.org/FakeRoot) or [yocto](https://www.yoctoproject.org/)
 
-1. Run ```simple_test.c``` and observe the differences in speed and memory allocation.
+1.Compile and Run ```simple_test.c``` and observe the differences in speed and memory allocation.
