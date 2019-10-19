@@ -1,6 +1,7 @@
 # Description
-Kernel Development
-Changing Linux kernel memory allocation algorithms from first-fit to best-fit.
+Kernel Development\n
+Changing Linux kernel memory allocation algorithm from first-fit to best-fit.
+The algorithms c files can be found in /sys/kernel/mm/
 
 ## Conclusion:
 Best-fit memory allocation algorithms was more effecient in using memory 4k, as oppose to first-fit which leaves more memory space empty in the 4k pages. However, best-fit algorithm was significantly slower. This explains why best-fit memory allocation algorithm is advised when memory is a scarce resource. 
