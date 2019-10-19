@@ -7,7 +7,7 @@ The SLOB (Simple list of blocks) allocator is one of three available memory allo
 
 The SLOB allocator is designed to require little memory for the implementation and housekeeping, for use in small systems such as embedded systems. Unfortunately, a major limitation of the SLOB allocator is that it suffers greatly from internal fragmentation.
 
-SLOB uses a first-fit algorithm, which uses the first available space for memory. 
+SLOB uses a first-fit algorithm by default, which uses the first available space for memory. 
 
 ## Algorithms 
 ### First-Fit
