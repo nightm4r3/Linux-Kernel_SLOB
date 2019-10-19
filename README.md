@@ -22,6 +22,10 @@ gcc slob_bestfit.c
 1. Run simple test to verify that its working?
 
 
+
+## Warning
+The program permanently change the Operating System memory allocation algorithms and memory handling, allocation, and memory retrieval.
+Thus, it is advised to test the program on a virtual machine first.
 ------------
 
 
@@ -31,5 +35,3 @@ The system needs to be patched with the c files for changes to take effect.
 
 The program was tested on virtual debian-based Operating systems powered by qemu. 
 
-## Warning
-The program permanently change the Operating System memory allocation algorithms and memory handling, allocation, and memory retrieval.
