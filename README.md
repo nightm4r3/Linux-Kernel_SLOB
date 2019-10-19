@@ -1,7 +1,14 @@
 # Description
-Altered the operating system memory allocation algorithm from first-fit, which the Linux current defauly, to best-fit, and vice versa.
+Altering Linux kernel memory allocation algorithm from first-fit to best-fit.
 
-As file name suggests, slob_firstfit.c changes the system's memory handling algorithm to first-fit, while slob_bestfit.c changes system's memory handling algorithms to best-fit.
+(Explain best-fit and first-fit algorithm)
+
+# How to use
+1. compile slob_bestfit
+```
+gcc slob_bestfit.c
+```
+slob_bestfit.c changes system's memory handling algorithms to best-fit.
 
 syscall_32.tbl is replaced with the kernel's "syscall_32.tbl", since it references the commands in the c files to be called correctly.  
 
