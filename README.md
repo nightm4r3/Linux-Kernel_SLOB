@@ -20,55 +20,55 @@ Best-fit memory allocation algorithms was more effecient in using memory 4k, as 
 
 # INSTRUCTIONS
 ## Create a virtual kernel environment: 
-1.For this experiment, I used qemu based [yocto](https://www.yoctoproject.org/) environment:<br/>
+1. For this experiment, I used qemu based [yocto](https://www.yoctoproject.org/) environment:<br/>
 ```
 git clone "git://git.yoctoproject.org/linux-yocto-3.14"
 cd linux-yocto-3.14
 git checkout v3.14.26
 ```
 
-2.Source the environment and compile<br/>
+2. Source the environment and compile<br/>
 ```source /scratch/opt/environment-setup-i586-poky-linux```
 
-3.Copy and make the menuconfig <br/>
+3. Copy and make the menuconfig <br/>
 ```cp /scratch/spring2017/files/config-3.14.26-yocto-qemu ./.config```
 ```make menuconfig```
 
-4.Setting the menuconfig
+4. Setting the menuconfig
 go to the "General setup"<br/>
 press / and type LOCALVERSION<br/>
 Rename the Kernel Configuration to <insert-name-here><br/>
 Save and Exit
 
-5.Make the kernel<br/>
+5. Make the kernel<br/>
 Using 16 threads: ```make -j16 all``` <br/>
 If you don't want to exhaust your memory, you can use: ```make -j$(noproc) all``` 
 
-6.Run gdb<br/>
+6. Run gdb<br/>
 open another terminal<br/>
 ```source /scratch/opt/environment-setup-i586-poky-linux```<br/>
 ```gdb ./vmlinux```<br/>
 ```(gdb) target remote tcp:127.0.0.1:5725```<br/>
 
-7.Login to the VM<br/>
+7. Login to the VM<br/>
 ```qemux86 login: root```<br/>
 ```root@qemux86: uname -a```<br/>
 ```root@qemux86: reboot```<br/>
 
-8.Run 
+8. Run 
 ```make menuconfig```
 
-9.Build the kernel with qemu<br/>
+9. Build the kernel with qemu<br/>
 ```qemu-system-i386 -gdb tcp::5725 -S -nographic -kernel linux-yocto-3.14/arch/x86/boot/bzImage -drive file=core-image-lsb-sdk-qemux86.ext3,if=virtio -enable-kvm -net none -usb -localtime --no-reboot --append "root=/dev/vda rw console=ttyS0 debug```
 
-10.Insure that it is running with gdb<br/>
+10. Insure that it is running with gdb<br/>
 ```(gdb) target remote :5725```
 
 ## Patch the kernel:
-1.Compile and replace the slob.c found in ```/sys/kernel/mm/``` with either ```slob_bestfit.c``` or ```slob_firstfit.c```.
+1. Compile and replace the slob.c found in ```/sys/kernel/mm/``` with either ```slob_bestfit.c``` or ```slob_firstfit.c```.
 
-2.Replace the kernel's ```syscall_32.tbl``` and ```syscalls.h``` with the ones supplied in this repository, since it references the memory allocation function calls from the ```slob.c``` file for the kernel to use them.
+2. Replace the kernel's ```syscall_32.tbl``` and ```syscalls.h``` with the ones supplied in this repository, since it references the memory allocation function calls from the ```slob.c``` file for the kernel to use them.
 
-1.Patch the system, using either [fakeroot](https://wiki.debian.org/FakeRoot) or [yocto](https://www.yoctoproject.org/)
+3. Patch the system, using either [fakeroot](https://wiki.debian.org/FakeRoot) or [yocto](https://www.yoctoproject.org/)
 
-1.Compile and Run ```simple_test.c``` and observe the differences in speed and memory allocation.
+4. Compile and Run ```simple_test.c``` and observe the differences in speed and memory allocation.
