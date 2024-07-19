@@ -13,7 +13,7 @@ SLOB uses a first-fit algorithm by default, which uses the first available space
 ### First-Fit
 First fit: There may be many holes in the memory, so the operating system, to reduce the amount of time it spends analyzing the available spaces, begins at the start of primary memory and allocates memory from the first hole it encounters large enough to satisfy the request. 
 ### Best-Fit 
-Best fit: The allocator places a process in the smallest block of unallocated memory in which it will fit, avoiding loss of ragmentation and consolidation of memory.
+Best fit: The allocator places a process in the smallest block of unallocated memory in which it will fit, avoiding loss of fragmentation and consolidation of memory.
 
 ## Experiment Conclusion:
 Best-fit memory allocation algorithms was more effecient in using memory 4k, as oppose to first-fit which leaves more memory space empty in the 4k pages. However, best-fit algorithm was significantly slower. This explains why best-fit memory allocation algorithm is advised when memory is a scarce resource. 
