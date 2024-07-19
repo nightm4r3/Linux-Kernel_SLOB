@@ -11,7 +11,7 @@ SLOB uses a first-fit algorithm by default, which uses the first available space
 
 ## Algorithms 
 ### First-Fit
-First fit: There may be many holes in the memory, so the operating system, to reduce the amount of time it spends analyzing the available spaces, begins at the start of primary memory and allocates memory from the first hole it encounters large enough to satisfy the request. 
+First fit: There may be many holes in the memory, so to reduce the amount of time the operating system spends analyzing the available spaces, the kernel begins the allocation at start of primary memory and allocates memory from the first hole it encounters large enough to satisfy the request. 
 ### Best-Fit 
 Best fit: The allocator places a process in the smallest block of unallocated memory in which it will fit, avoiding loss of fragmentation and consolidation of memory.
 
